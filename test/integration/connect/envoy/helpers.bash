@@ -176,7 +176,7 @@ function assert_service_has_healthy_instances {
 }
 
 function docker_consul {
-  docker run -ti --rm --network container:envoy_consul_1 consul-dev $@
+  docker run -i --rm --network container:envoy_consul_1 consul-dev $@
 }
 
 function docker_wget {
@@ -252,6 +252,12 @@ function gen_envoy_bootstrap {
     echo "$output"
     return $status
   fi
+}
+
+function read_config_entry {
+  local KIND=$1
+  local NAME=$2
+  docker_consul config read -kind $KIND -name $NAME
 }
 
 function get_upstream_fortio_name {
