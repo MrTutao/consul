@@ -260,6 +260,12 @@ function read_config_entry {
   docker_consul config read -kind $KIND -name $NAME
 }
 
+function wait_for_config_entry {
+  local KIND=$1
+  local NAME=$2
+  retry_default read_config_entry $KIND $NAME >/dev/null
+}
+
 function get_upstream_fortio_name {
   run retry_default curl -v -s -f localhost:5000/debug?env=dump
   [ "$status" == 0 ]
