@@ -60,7 +60,7 @@ func TestUiIndex(t *testing.T) {
 	// Verify the body
 	out := bytes.NewBuffer(nil)
 	io.Copy(out, resp.Body)
-	if string(out.Bytes()) != "test" {
+	if out.String() != "test" {
 		t.Fatalf("bad: %s", out.Bytes())
 	}
 }
@@ -325,6 +325,7 @@ func TestUiServices(t *testing.T) {
 				ChecksPassing:  2,
 				ChecksWarning:  1,
 				ChecksCritical: 0,
+				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 			},
 			&ServiceSummary{
 				Kind:           structs.ServiceKindTypical,
@@ -334,6 +335,7 @@ func TestUiServices(t *testing.T) {
 				ChecksPassing:  0,
 				ChecksWarning:  0,
 				ChecksCritical: 0,
+				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 			},
 			&ServiceSummary{
 				Kind:            structs.ServiceKindConnectProxy,
@@ -344,6 +346,7 @@ func TestUiServices(t *testing.T) {
 				ChecksWarning:   1,
 				ChecksCritical:  1,
 				ExternalSources: []string{"k8s"},
+				EnterpriseMeta:  *structs.DefaultEnterpriseMeta(),
 			},
 			&ServiceSummary{
 				Kind:           structs.ServiceKindTypical,
@@ -353,6 +356,7 @@ func TestUiServices(t *testing.T) {
 				ChecksPassing:  1,
 				ChecksWarning:  0,
 				ChecksCritical: 0,
+				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 			},
 		}
 		require.ElementsMatch(t, expected, summary)
@@ -384,6 +388,7 @@ func TestUiServices(t *testing.T) {
 				ChecksPassing:  2,
 				ChecksWarning:  1,
 				ChecksCritical: 0,
+				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 			},
 			&ServiceSummary{
 				Kind:            structs.ServiceKindConnectProxy,
@@ -394,6 +399,7 @@ func TestUiServices(t *testing.T) {
 				ChecksWarning:   1,
 				ChecksCritical:  1,
 				ExternalSources: []string{"k8s"},
+				EnterpriseMeta:  *structs.DefaultEnterpriseMeta(),
 			},
 		}
 		require.ElementsMatch(t, expected, summary)

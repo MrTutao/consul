@@ -16,6 +16,7 @@ page documents the system architecture.
 [glossary](/docs/glossary.html) of terms to help
 clarify what is being discussed.
 
+The architecture concepts in this document can be used with the [Reference Architecture guide](https://learn.hashicorp.com/consul/datacenter-deploy/reference-architecture?utm_source=consul.io&utm_medium=docs) when deploying Consul in production.
 
 ## 10,000 foot view
 
@@ -41,7 +42,7 @@ This means there is a gossip pool that contains all the agents for a given datac
 a few purposes: first, there is no need to configure clients with the addresses of servers;
 discovery is done automatically. Second, the work of detecting agent failures
 is not placed on the servers but is distributed. This makes failure detection much more
-scalable than naive heartbeating schemes. It also provides failure detection for the nodes; if the agent is not reachable, than the node may have experienced a failure. Thirdly, it is used as a messaging layer to notify
+scalable than naive heartbeating schemes. It also provides failure detection for the nodes; if the agent is not reachable, then the node may have experienced a failure. Thirdly, it is used as a messaging layer to notify
 when important events such as leader election take place.
 
 The servers in each datacenter are all part of a single Raft peer set. This means that

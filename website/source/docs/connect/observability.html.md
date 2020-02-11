@@ -7,7 +7,7 @@ description: |-
   Consul Connect.
 ---
 
-## Observability
+# Observability
 
 In order to take advantage of Connect's L7 observability features you will need
 to:
@@ -18,14 +18,16 @@ to:
 - Define the protocols for each of your services.
 - Define the upstreams for each of your services.
 
-If you are using Envoy as your sidecar proxy, you will need to enable [enable
+If you are using Envoy as your sidecar proxy, you will need to [enable
 gRPC](/docs/agent/options.html#grpc_port) on your client agents. To define the
 metrics destination and service protocol you may want to enable [configuration
 entries](/docs/agent/options.html#config_entries) and [centralized service
-configuration](/docs/agent/options.html#enable_central_service_config). If you
-are using Kubernetes, the Helm chart can simpify much of the necessary
+configuration](/docs/agent/options.html#enable_central_service_config). 
+
+If you
+are using Kubernetes, the Helm chart can simplify much of the necessary
 configuration, which you can learn about in the [observability
-guide](https://learn.hashicorp.com/consul/getting-started-k8s/l7-observability-k8s).
+guide](https://learn.hashicorp.com/consul/kubernetes/l7-observability-k8s).
 
 ### Metrics Destination
 
@@ -44,7 +46,7 @@ Find other possible metrics syncs in the [Connect Envoy documentation](/docs/con
 
 ### Service Protocol
 
-You can specify the [service protocol](/docs/agent/config_entries.html#protocol)
+You can specify the [service protocol](/docs/agent/config-entries/service-defaults.html#protocol)
 in the `service-defaults` configuration entry. You can override it in the
 [service registration](/docs/agent/services.html). By default, proxies only give
 you L4 metrics. This protocol allows proxies to handle requests at the right L7

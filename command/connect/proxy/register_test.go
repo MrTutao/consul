@@ -6,6 +6,7 @@ import (
 
 	"github.com/hashicorp/consul/agent"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,6 @@ func TestRegisterMonitor_good(t *testing.T) {
 
 func TestRegisterMonitor_heartbeat(t *testing.T) {
 	t.Parallel()
-	require := require.New(t)
 
 	a := agent.NewTestAgent(t, t.Name(), ``)
 	defer a.Shutdown()
@@ -49,11 +49,11 @@ func TestRegisterMonitor_heartbeat(t *testing.T) {
 	retry.Run(t, func(r *retry.R) {
 		// Get the check and verify that it is passing
 		checks, err := client.Agent().Checks()
-		require.NoError(err)
-		require.Contains(checks, m.checkID())
-		require.Equal("passing", checks[m.checkID()].Status)
+		require.NoError(r, err)
+		require.Contains(r, checks, m.checkID())
+		require.Equal(r, "passing", checks[m.checkID()].Status)
 		// Purposely fail the TTL check, verify it becomes healthy again
-		require.NoError(client.Agent().FailTTL(m.checkID(), ""))
+		require.NoError(r, client.Agent().FailTTL(m.checkID(), ""))
 	})
 
 	retry.Run(t, func(r *retry.R) {
@@ -78,7 +78,7 @@ func TestRegisterMonitor_heartbeat(t *testing.T) {
 // It waits until the service appears in the catalog and then returns.
 func testMonitor(t *testing.T, client *api.Client) (*RegisterMonitor, *api.AgentService) {
 	// Setup the monitor
-	m := NewRegisterMonitor()
+	m := NewRegisterMonitor(testutil.Logger(t))
 	m.Client = client
 	m.Service = "foo"
 	m.LocalAddress = "127.0.0.1"

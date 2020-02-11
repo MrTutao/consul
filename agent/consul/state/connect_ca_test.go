@@ -28,7 +28,7 @@ func TestStore_CAConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	idx, config, err := s.CAConfig()
+	idx, config, err := s.CAConfig(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestStore_CAConfigCAS(t *testing.T) {
 
 	// Check that the index is untouched and the entry
 	// has not been updated.
-	idx, config, err := s.CAConfig()
+	idx, config, err := s.CAConfig(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestStore_CAConfigCAS(t *testing.T) {
 	}
 
 	// Make sure the config was updated
-	idx, config, err = s.CAConfig()
+	idx, config, err = s.CAConfig(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestStore_CAConfig_Snapshot_Restore(t *testing.T) {
 	}
 	restore.Commit()
 
-	idx, res, err := s2.CAConfig()
+	idx, res, err := s2.CAConfig(nil)
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -171,7 +171,7 @@ func TestStore_CAConfig_Snapshot_Restore_BlankConfig(t *testing.T) {
 	}
 	restore.Commit()
 
-	idx, result, err := s2.CAConfig()
+	idx, result, err := s2.CAConfig(nil)
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -423,6 +423,23 @@ func TestStore_CABuiltinProvider(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(idx, uint64(1))
 		assert.Equal(expected, state)
+	}
+
+	{
+		// Since we've already written to the builtin provider table the serial
+		// numbers will initialize from the max index of the provider table.
+		// That's why this first serial is 2 and not 1.
+		sn, err := s.CAIncrementProviderSerialNumber()
+		assert.NoError(err)
+		assert.Equal(uint64(2), sn)
+
+		sn, err = s.CAIncrementProviderSerialNumber()
+		assert.NoError(err)
+		assert.Equal(uint64(3), sn)
+
+		sn, err = s.CAIncrementProviderSerialNumber()
+		assert.NoError(err)
+		assert.Equal(uint64(4), sn)
 	}
 }
 

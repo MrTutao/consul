@@ -12,7 +12,8 @@ Configuration entries can be created to provide cluster-wide defaults for
 various aspects of Consul. Every configuration entry has at least two fields:
 `Kind` and `Name`. Those two fields are used to uniquely identify a
 configuration entry. When put into configuration files, configuration entries
-can be specified as HCL or JSON objects.
+can be specified as HCL or JSON objects using either `snake_case` or `CamelCase`
+for key names.
 
 Example:
 
@@ -21,53 +22,22 @@ Kind = "<supported kind>"
 Name = "<name of entry>"
 ```
 
-The two supported `Kind` configuration entries are detailed below.
+The supported `Kind` names for configuration entries are:
 
-## Configuration Entry Kinds
+* [`service-router`](/docs/agent/config-entries/service-router.html) - defines
+where to send layer 7 traffic based on the HTTP route
 
-### Proxy Defaults - `proxy-defaults`
+* [`service-splitter`](/docs/agent/config-entries/service-splitter.html) - defines
+how to divide requests for a single HTTP route based on percentages
 
-Proxy defaults allow for configuring global config defaults across all services
-for Connect proxy configuration. Currently, only one global entry is supported.
+* [`service-resolver`](/docs/agent/config-entries/service-resolver.html) - matches
+service instances with a specific Connect upstream discovery requests
 
-```hcl
-Kind = "proxy-defaults"
-Name = "global"
-Config {
-   local_connect_timeout_ms = 1000
-   handshake_timeout_ms = 10000
-}
-```
+* [`service-defaults`](/docs/agent/config-entries/service-defaults.html) - configures
+defaults for all the instances of a given service
 
-* `Kind` - Must be set to `proxy-defaults`
-
-* `Name` - Must be set to `global`
-
-* `Config` - An arbitrary map of configuration values used by Connect proxies.
-  The available configurations depend on the Connect proxy you use. Any values
-  that your proxy allows can be configured globally here. To
-  explore these options please see the documentation for your chosen proxy.
-
-  * [Envoy](/docs/connect/proxies/envoy.html#bootstrap-configuration)
-  * [Consul's Builtin Proxy](/docs/connect/proxies/built-in.html)
-
-### Service Defaults - `service-defaults`
-
-Service defaults control default global values for a service, such as its
-protocol.
-
-```hcl
-Kind = "service-defaults"
-Name = "web"
-Protocol = "http"
-```
-
-* `Kind` - Must be set to `service-defaults`
-
-* `Name` - Set to the name of the service being configured.
-
-* `Protocol` - Sets the protocol of the service. This is used by Connect proxies
-  for things like observability features.
+* [`proxy-defaults`](/docs/agent/config-entries/proxy-defaults.html) - controls
+proxy configuration
 
 ## Managing Configuration Entries
 
@@ -155,15 +125,33 @@ $ consul config delete -kind service-defaults -name web
 
 This command will not output anything when the deletion is successful.
 
+#### Configuration Entry Management with Namespaces
+
+**Enterprise Only** - Configuration entry operations support passing a namespace in
+order to isolate the entry to affect only operations within that namespace. This was
+added in Consul 1.7.0.
+
+Example: 
+
+```bash
+$ consul config write service-defaults.hcl -namespace foo
+```
+
+```bash
+$ consul config list -kind service-defaults -namespace foo
+web
+api
+```
+
 ### Bootstrapping From A Configuration File
 
 
-Configuration entries can be bootstrapped by adding them inline to each Consul
-server’s configuration file. When a server gains leadership, it will attempt to
-initialize the configuration entries. If a configuration entry does not already
-exist outside of the servers configuration, then it will create it. If a
-configuration entry does exist, that matches both `kind` and `name`, then the
-server will do nothing.
+Configuration entries can be bootstrapped by adding them [inline to each Consul
+server's configuration file](/docs/agent/options.html#config_entries). When a
+server gains leadership, it will attempt to initialize the configuration entries.
+If a configuration entry does not already exist outside of the servers
+configuration, then it will create it. If a configuration entry does exist, that
+matches both `kind` and `name`, then the server will do nothing.
 
 
 ## Using Configuration Entries For Service Defaults

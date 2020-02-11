@@ -7,11 +7,24 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/go-hclog"
+	metrics "github.com/armon/go-metrics"
+	hclog "github.com/hashicorp/go-hclog"
+)
 
-	"github.com/armon/go-metrics"
+const (
+	// This is the current suggested max size of the data in a raft log entry.
+	// This is based on current architecture, default timing, etc. Clients can
+	// ignore this value if they want as there is no actual hard checking
+	// within the library. As the library is enhanced this value may change
+	// over time to reflect current suggested maximums.
+	//
+	// Increasing beyond this risks RPC IO taking too long and preventing
+	// timely heartbeat signals which are sent in serial in current transports,
+	// potentially causing leadership instability.
+	SuggestedMaxDataSize = 512 * 1024
 )
 
 var (
@@ -126,6 +139,10 @@ type Raft struct {
 	// the log/snapshot.
 	configurations configurations
 
+	// Holds a copy of the latest configuration which can be read
+	// independently from main loop.
+	latestConfiguration atomic.Value
+
 	// RPC chan comes from the transport layer
 	rpcCh <-chan RPC
 
@@ -175,9 +192,12 @@ type Raft struct {
 
 // BootstrapCluster initializes a server's storage with the given cluster
 // configuration. This should only be called at the beginning of time for the
-// cluster, and you absolutely must make sure that you call it with the same
-// configuration on all the Voter servers. There is no need to bootstrap
-// Nonvoter and Staging servers.
+// cluster with an identical configuration listing all Voter servers. There is
+// no need to bootstrap Nonvoter and Staging servers.
+//
+// A cluster can only be bootstrapped once from a single participating Voter
+// server. Any further attempts to bootstrap will return an error that can be
+// safely ignored.
 //
 // One sane approach is to bootstrap a single server with a configuration
 // listing just itself as a Voter, then invoke AddVoter() on it to add other
@@ -218,7 +238,7 @@ func BootstrapCluster(conf *Config, logs LogStore, stable StableStore,
 		entry.Data = encodePeers(configuration, trans)
 	} else {
 		entry.Type = LogConfiguration
-		entry.Data = encodeConfiguration(configuration)
+		entry.Data = EncodeConfiguration(configuration)
 	}
 	if err := logs.StoreLog(entry); err != nil {
 		return fmt.Errorf("failed to append configuration entry to log: %v", err)
@@ -272,31 +292,34 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	// expect data to be there and it's not. By refusing, we force them
 	// to show intent to start a cluster fresh by explicitly doing a
 	// bootstrap, rather than quietly fire up a fresh cluster here.
-	hasState, err := HasExistingState(logs, stable, snaps)
-	if err != nil {
+	if hasState, err := HasExistingState(logs, stable, snaps); err != nil {
 		return fmt.Errorf("failed to check for existing state: %v", err)
-	}
-	if !hasState {
+	} else if !hasState {
 		return fmt.Errorf("refused to recover cluster with no initial state, this is probably an operator error")
 	}
 
 	// Attempt to restore any snapshots we find, newest to oldest.
-	var snapshotIndex uint64
-	var snapshotTerm uint64
-	snapshots, err := snaps.List()
+	var (
+		snapshotIndex  uint64
+		snapshotTerm   uint64
+		snapshots, err = snaps.List()
+	)
 	if err != nil {
 		return fmt.Errorf("failed to list snapshots: %v", err)
 	}
 	for _, snapshot := range snapshots {
-		_, source, err := snaps.Open(snapshot.ID)
+		var source io.ReadCloser
+		_, source, err = snaps.Open(snapshot.ID)
 		if err != nil {
 			// Skip this one and try the next. We will detect if we
 			// couldn't open any snapshots.
 			continue
 		}
-		defer source.Close()
 
-		if err := fsm.Restore(source); err != nil {
+		err = fsm.Restore(source)
+		// Close the source after the restore has completed
+		source.Close()
+		if err != nil {
 			// Same here, skip and try the next one.
 			continue
 		}
@@ -321,7 +344,7 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	}
 	for index := snapshotIndex + 1; index <= lastLogIndex; index++ {
 		var entry Log
-		if err := logs.GetLog(index, &entry); err != nil {
+		if err = logs.GetLog(index, &entry); err != nil {
 			return fmt.Errorf("failed to get log at index %d: %v", index, err)
 		}
 		if entry.Type == LogCommand {
@@ -342,10 +365,10 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot: %v", err)
 	}
-	if err := snapshot.Persist(sink); err != nil {
+	if err = snapshot.Persist(sink); err != nil {
 		return fmt.Errorf("failed to persist snapshot: %v", err)
 	}
-	if err := sink.Close(); err != nil {
+	if err = sink.Close(); err != nil {
 		return fmt.Errorf("failed to finalize snapshot: %v", err)
 	}
 
@@ -360,6 +383,23 @@ func RecoverCluster(conf *Config, fsm FSM, logs LogStore, stable StableStore,
 	}
 
 	return nil
+}
+
+// GetConfiguration returns the configuration of the Raft cluster without
+// starting a Raft instance or connecting to the cluster
+// This function has identical behavior to Raft.GetConfiguration
+func GetConfiguration(conf *Config, fsm FSM, logs LogStore, stable StableStore,
+	snaps SnapshotStore, trans Transport) (Configuration, error) {
+	conf.skipStartup = true
+	r, err := NewRaft(conf, fsm, logs, stable, snaps, trans)
+	if err != nil {
+		return Configuration{}, err
+	}
+	future := r.GetConfiguration()
+	if err = future.Error(); err != nil {
+		return Configuration{}, err
+	}
+	return future.Configuration(), nil
 }
 
 // HasExistingState returns true if the server has any existing state (logs,
@@ -508,19 +548,23 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 	for index := snapshotIndex + 1; index <= lastLog.Index; index++ {
 		var entry Log
 		if err := r.logs.GetLog(index, &entry); err != nil {
-			r.logger.Error(fmt.Sprintf("Failed to get log at %d: %v", index, err))
+			r.logger.Error("failed to get log", "index", index, "error", err)
 			panic(err)
 		}
 		r.processConfigurationLogEntry(&entry)
 	}
-	r.logger.Info(fmt.Sprintf("Initial configuration (index=%d): %+v",
-		r.configurations.latestIndex, r.configurations.latest.Servers))
+	r.logger.Info("initial configuration",
+		"index", r.configurations.latestIndex,
+		"servers", hclog.Fmt("%+v", r.configurations.latest.Servers))
 
 	// Setup a heartbeat fast-path to avoid head-of-line
 	// blocking where possible. It MUST be safe for this
 	// to be called concurrently with a blocking RPC.
 	trans.SetHeartbeatHandler(r.processHeartbeat)
 
+	if conf.skipStartup {
+		return r, nil
+	}
 	// Start the background work.
 	r.goFunc(r.run)
 	r.goFunc(r.runFSM)
@@ -534,27 +578,29 @@ func NewRaft(conf *Config, fsm FSM, logs LogStore, stable StableStore, snaps Sna
 func (r *Raft) restoreSnapshot() error {
 	snapshots, err := r.snapshots.List()
 	if err != nil {
-		r.logger.Error(fmt.Sprintf("Failed to list snapshots: %v", err))
+		r.logger.Error("failed to list snapshots", "error", err)
 		return err
 	}
 
 	// Try to load in order of newest to oldest
 	for _, snapshot := range snapshots {
-		_, source, err := r.snapshots.Open(snapshot.ID)
-		if err != nil {
-			r.logger.Error(fmt.Sprintf("Failed to open snapshot %v: %v", snapshot.ID, err))
-			continue
+		if !r.conf.NoSnapshotRestoreOnStart {
+			_, source, err := r.snapshots.Open(snapshot.ID)
+			if err != nil {
+				r.logger.Error("failed to open snapshot", "id", snapshot.ID, "error", err)
+				continue
+			}
+
+			err = r.fsm.Restore(source)
+			// Close the source after the restore has completed
+			source.Close()
+			if err != nil {
+				r.logger.Error("failed to restore snapshot", "id", snapshot.ID, "error", err)
+				continue
+			}
+
+			r.logger.Info("restored from snapshot", "id", snapshot.ID)
 		}
-		defer source.Close()
-
-		if err := r.fsm.Restore(source); err != nil {
-			r.logger.Error(fmt.Sprintf("Failed to restore snapshot %v: %v", snapshot.ID, err))
-			continue
-		}
-
-		// Log success
-		r.logger.Info(fmt.Sprintf("Restored from snapshot %v", snapshot.ID))
-
 		// Update the lastApplied so we don't replay old logs
 		r.setLastApplied(snapshot.Index)
 
@@ -562,18 +608,17 @@ func (r *Raft) restoreSnapshot() error {
 		r.setLastSnapshot(snapshot.Index, snapshot.Term)
 
 		// Update the configuration
+		var conf Configuration
+		var index uint64
 		if snapshot.Version > 0 {
-			r.configurations.committed = snapshot.Configuration
-			r.configurations.committedIndex = snapshot.ConfigurationIndex
-			r.configurations.latest = snapshot.Configuration
-			r.configurations.latestIndex = snapshot.ConfigurationIndex
+			conf = snapshot.Configuration
+			index = snapshot.ConfigurationIndex
 		} else {
-			configuration := decodePeers(snapshot.Peers, r.trans)
-			r.configurations.committed = configuration
-			r.configurations.committedIndex = snapshot.Index
-			r.configurations.latest = configuration
-			r.configurations.latestIndex = snapshot.Index
+			conf = decodePeers(snapshot.Peers, r.trans)
+			index = snapshot.Index
 		}
+		r.setCommittedConfiguration(conf, index)
+		r.setLatestConfiguration(conf, index)
 
 		// Success!
 		return nil
@@ -588,10 +633,17 @@ func (r *Raft) restoreSnapshot() error {
 
 // BootstrapCluster is equivalent to non-member BootstrapCluster but can be
 // called on an un-bootstrapped Raft instance after it has been created. This
-// should only be called at the beginning of time for the cluster, and you
-// absolutely must make sure that you call it with the same configuration on all
-// the Voter servers. There is no need to bootstrap Nonvoter and Staging
-// servers.
+// should only be called at the beginning of time for the cluster with an
+// identical configuration listing all Voter servers. There is no need to
+// bootstrap Nonvoter and Staging servers.
+//
+// A cluster can only be bootstrapped once from a single participating Voter
+// server. Any further attempts to bootstrap will return an error that can be
+// safely ignored.
+//
+// One sane approach is to bootstrap a single server with a configuration
+// listing just itself as a Voter, then invoke AddVoter() on it to add other
+// servers to the cluster.
 func (r *Raft) BootstrapCluster(configuration Configuration) Future {
 	bootstrapReq := &bootstrapFuture{}
 	bootstrapReq.init()
@@ -620,7 +672,14 @@ func (r *Raft) Leader() ServerAddress {
 // for the command to be started. This must be run on the leader or it
 // will fail.
 func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
+	return r.ApplyLog(Log{Data: cmd}, timeout)
+}
+
+// ApplyLog performs Apply but takes in a Log directly. The only values
+// currently taken from the submitted Log are Data and Extensions.
+func (r *Raft) ApplyLog(log Log, timeout time.Duration) ApplyFuture {
 	metrics.IncrCounter([]string{"raft", "apply"}, 1)
+
 	var timer <-chan time.Time
 	if timeout > 0 {
 		timer = time.After(timeout)
@@ -629,8 +688,9 @@ func (r *Raft) Apply(cmd []byte, timeout time.Duration) ApplyFuture {
 	// Create a log future, no index or term yet
 	logFuture := &logFuture{
 		log: Log{
-			Type: LogCommand,
-			Data: cmd,
+			Type:       LogCommand,
+			Data:       log.Data,
+			Extensions: log.Extensions,
 		},
 	}
 	logFuture.init()
@@ -690,19 +750,14 @@ func (r *Raft) VerifyLeader() Future {
 	}
 }
 
-// GetConfiguration returns the latest configuration and its associated index
-// currently in use. This may not yet be committed. This must not be called on
-// the main thread (which can access the information directly).
+// GetConfiguration returns the latest configuration. This may not yet be
+// committed. The main loop can access this directly.
 func (r *Raft) GetConfiguration() ConfigurationFuture {
 	configReq := &configurationsFuture{}
 	configReq.init()
-	select {
-	case <-r.shutdownCh:
-		configReq.respond(ErrRaftShutdown)
-		return configReq
-	case r.configurationsCh <- configReq:
-		return configReq
-	}
+	configReq.configurations = configurations{latest: r.getLatestConfiguration()}
+	configReq.respond(nil)
+	return configReq
 }
 
 // AddPeer (deprecated) is used to add a new peer into the cluster. This must be
@@ -934,7 +989,7 @@ func (r *Raft) LastContact() time.Time {
 // "last_snapshot_index", "last_snapshot_term",
 // "latest_configuration", "last_contact", and "num_peers".
 //
-// The value of "state" is a numeric constant representing one of 
+// The value of "state" is a numeric constant representing one of
 // the possible leadership states the node is in at any given time.
 // the possible states are: "Follower", "Candidate", "Leader", "Shutdown".
 //
@@ -976,7 +1031,7 @@ func (r *Raft) Stats() map[string]string {
 
 	future := r.GetConfiguration()
 	if err := future.Error(); err != nil {
-		r.logger.Warn(fmt.Sprintf("could not get configuration for Stats: %v", err))
+		r.logger.Warn("could not get configuration for stats", "error", err)
 	} else {
 		configuration := future.Configuration()
 		s["latest_configuration_index"] = toString(future.Index())

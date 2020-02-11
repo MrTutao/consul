@@ -52,8 +52,10 @@ func TestAPI_CatalogNodes(t *testing.T) {
 				Address:    "127.0.0.1",
 				Datacenter: "dc1",
 				TaggedAddresses: map[string]string{
-					"lan": "127.0.0.1",
-					"wan": "127.0.0.1",
+					"lan":      "127.0.0.1",
+					"lan_ipv4": "127.0.0.1",
+					"wan":      "127.0.0.1",
+					"wan_ipv4": "127.0.0.1",
 				},
 				Meta: map[string]string{
 					"consul-network-segment": "",
@@ -342,10 +344,10 @@ func TestAPI_CatalogService_SingleTag(t *testing.T) {
 
 	retry.Run(t, func(r *retry.R) {
 		services, meta, err := catalog.Service("foo", "bar", nil)
-		require.NoError(t, err)
-		require.NotEqual(t, meta.LastIndex, 0)
-		require.Len(t, services, 1)
-		require.Equal(t, services[0].ServiceID, "foo1")
+		require.NoError(r, err)
+		require.NotEqual(r, meta.LastIndex, 0)
+		require.Len(r, services, 1)
+		require.Equal(r, services[0].ServiceID, "foo1")
 	})
 }
 
@@ -380,23 +382,23 @@ func TestAPI_CatalogService_MultipleTags(t *testing.T) {
 	retry.Run(t, func(r *retry.R) {
 		services, meta, err := catalog.ServiceMultipleTags("foo", []string{"bar"}, nil)
 
-		require.NoError(t, err)
-		require.NotEqual(t, meta.LastIndex, 0)
+		require.NoError(r, err)
+		require.NotEqual(r, meta.LastIndex, 0)
 
 		// Should be 2 services with the `bar` tag
-		require.Len(t, services, 2)
+		require.Len(r, services, 2)
 	})
 
 	// Test searching with two tags (one result)
 	retry.Run(t, func(r *retry.R) {
 		services, meta, err := catalog.ServiceMultipleTags("foo", []string{"bar", "v2"}, nil)
 
-		require.NoError(t, err)
-		require.NotEqual(t, meta.LastIndex, 0)
+		require.NoError(r, err)
+		require.NotEqual(r, meta.LastIndex, 0)
 
 		// Should be exactly 1 service, named "foo2"
-		require.Len(t, services, 1)
-		require.Equal(t, services[0].ServiceID, "foo2")
+		require.Len(r, services, 1)
+		require.Equal(r, services[0].ServiceID, "foo2")
 	})
 }
 
@@ -532,11 +534,6 @@ func TestAPI_CatalogConnect(t *testing.T) {
 
 	proxy := proxyReg.Service
 
-	// DEPRECATED (ProxyDestination) - remove this case when the field is removed
-	deprecatedProxyReg := testUnmanagedProxyRegistration(t)
-	deprecatedProxyReg.Service.ProxyDestination = deprecatedProxyReg.Service.Proxy.DestinationServiceName
-	deprecatedProxyReg.Service.Proxy = nil
-
 	service := &AgentService{
 		ID:      proxyReg.Service.Proxy.DestinationServiceID,
 		Service: proxyReg.Service.Proxy.DestinationServiceName,
@@ -561,10 +558,6 @@ func TestAPI_CatalogConnect(t *testing.T) {
 
 	retry.Run(t, func(r *retry.R) {
 		if _, err := catalog.Register(reg, nil); err != nil {
-			r.Fatal(err)
-		}
-		// First try to register deprecated proxy, shouldn't error
-		if _, err := catalog.Register(deprecatedProxyReg, nil); err != nil {
 			r.Fatal(err)
 		}
 		if _, err := catalog.Register(proxyReg, nil); err != nil {
@@ -729,6 +722,65 @@ func TestAPI_CatalogNode(t *testing.T) {
 		if !reflect.DeepEqual(proxyReg.Service.Proxy, info.Services["web-proxy1"].Proxy) {
 			r.Fatalf("Bad proxy config:\nwant %v\n got: %v", proxyReg.Service.Proxy,
 				info.Services["web-proxy"].Proxy)
+		}
+	})
+}
+
+func TestAPI_CatalogNodeServiceList(t *testing.T) {
+	t.Parallel()
+	c, s := makeClient(t)
+	defer s.Stop()
+
+	catalog := c.Catalog()
+
+	name, err := c.Agent().NodeName()
+	require.NoError(t, err)
+
+	proxyReg := testUnmanagedProxyRegistration(t)
+	proxyReg.Node = name
+	proxyReg.SkipNodeUpdate = true
+
+	retry.Run(t, func(r *retry.R) {
+		// Register a connect proxy to ensure all it's config fields are returned
+		_, err := catalog.Register(proxyReg, nil)
+		r.Check(err)
+
+		info, meta, err := catalog.NodeServiceList(name, nil)
+		if err != nil {
+			r.Fatal(err)
+		}
+
+		if meta.LastIndex == 0 {
+			r.Fatalf("Bad: %v", meta)
+		}
+
+		if len(info.Services) != 2 {
+			r.Fatalf("Bad: %v (len %d)", info, len(info.Services))
+		}
+
+		if _, ok := info.Node.TaggedAddresses["wan"]; !ok {
+			r.Fatalf("Bad: %v", info.Node.TaggedAddresses)
+		}
+
+		if info.Node.Datacenter != "dc1" {
+			r.Fatalf("Bad datacenter: %v", info)
+		}
+
+		var proxySvc *AgentService
+		for _, svc := range info.Services {
+			if svc.ID == "web-proxy1" {
+				proxySvc = svc
+				break
+			}
+		}
+
+		if proxySvc == nil {
+			r.Fatalf("Missing proxy service: %v", info.Services)
+		}
+
+		if !reflect.DeepEqual(proxyReg.Service.Proxy, proxySvc.Proxy) {
+			r.Fatalf("Bad proxy config:\nwant %v\n got: %v", proxyReg.Service.Proxy,
+				proxySvc.Proxy)
 		}
 	})
 }

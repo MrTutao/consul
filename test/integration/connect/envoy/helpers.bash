@@ -9,23 +9,46 @@ function retry {
   shift
   local delay=$1
   shift
-  while true; do
-    "$@" && break || {
-      exit=$?
-      if [[ $n -lt $max ]]; then
-        ((n++))
-        echo "Command failed. Attempt $n/$max:"
-        sleep $delay;
-      else
-        echo "The command has failed after $n attempts." >&2
-        return $exit
+
+  local errtrace=0
+  if grep -q "errtrace" <<< "$SHELLOPTS"
+  then
+    errtrace=1
+    set +E
+  fi
+
+  for ((i=1;i<=$max;i++))
+  do
+    if "$@"
+    then
+      if test $errtrace -eq 1
+      then
+        set -E
       fi
-    }
+      return 0
+    else
+      echo "Command failed. Attempt $i/$max:"
+      sleep $delay
+    fi
   done
+
+  if test $errtrace -eq 1
+  then
+    set -E
+  fi
+  return 1
 }
 
 function retry_default {
-  retry 5 1 $@
+  set +E
+  ret=0
+  retry 5 1 "$@" || ret=1
+  set -E
+  return $ret
+}
+
+function retry_long {
+  retry 30 1 "$@"
 }
 
 function echored {
@@ -56,24 +79,45 @@ function echoblue {
   tput sgr0
 }
 
+function is_set {
+   # Arguments:
+   #   $1 - string value to check its truthiness
+   #
+   # Return:
+   #   0 - is truthy (backwards I know but allows syntax like `if is_set <var>` to work)
+   #   1 - is not truthy
+
+   local val=$(tr '[:upper:]' '[:lower:]' <<< "$1")
+   case $val in
+      1 | t | true | y | yes)
+         return 0
+         ;;
+      *)
+         return 1
+         ;;
+   esac
+}
+
 function get_cert {
   local HOSTPORT=$1
-  openssl s_client -connect $HOSTPORT \
-    -showcerts 2>/dev/null \
-    | openssl x509 -noout -text
+  CERT=$(openssl s_client -connect $HOSTPORT -showcerts )
+  openssl x509 -noout -text <<< "$CERT"
 }
 
 function assert_proxy_presents_cert_uri {
   local HOSTPORT=$1
   local SERVICENAME=$2
+  local DC=${3:-primary}
+  local NS=${4:-default}
+
 
   CERT=$(retry_default get_cert $HOSTPORT)
 
-  echo "WANT SERVICE: $SERVICENAME"
+  echo "WANT SERVICE: ${NS}/${SERVICENAME}"
   echo "GOT CERT:"
   echo "$CERT"
 
-  echo "$CERT" | grep -Eo "URI:spiffe://([a-zA-Z0-9-]+).consul/ns/default/dc/dc1/svc/$SERVICENAME"
+  echo "$CERT" | grep -Eo "URI:spiffe://([a-zA-Z0-9-]+).consul/ns/${NS}/dc/${DC}/svc/$SERVICENAME"
 }
 
 function assert_envoy_version {
@@ -100,7 +144,26 @@ function get_envoy_listener_filters {
   local HOSTPORT=$1
   run retry_default curl -s -f $HOSTPORT/config_dump
   [ "$status" -eq 0 ]
-  echo "$output" | jq --raw-output '.configs[2].dynamic_active_listeners[].listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
+  local ENVOY_VERSION=$(echo $output | jq --raw-output '.configs[0].bootstrap.node.metadata.envoy_version')
+  local QUERY=''
+  if [ "$ENVOY_VERSION" == "1.13.0" ]; then
+    QUERY='.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
+  else
+    QUERY='.configs[2].dynamic_active_listeners[].listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
+  fi
+  echo "$output" | jq --raw-output "$QUERY"
+}
+
+function get_envoy_cluster_threshold {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  run retry_default curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output "
+    .configs[1].dynamic_active_clusters[]
+    | select(.cluster.name|startswith(\"${CLUSTER_NAME}\"))
+    | .cluster.circuit_breakers.thresholds[0]
+  "
 }
 
 function get_envoy_stats_flush_interval {
@@ -111,12 +174,270 @@ function get_envoy_stats_flush_interval {
   echo "$output" | jq --raw-output '.configs[0].bootstrap.stats_flush_interval'
 }
 
+# snapshot_envoy_admin is meant to be used from a teardown scriptlet from the host.
+function snapshot_envoy_admin {
+  local HOSTPORT=$1
+  local ENVOY_NAME=$2
+  local DC=${3:-primary}
+
+
+  docker_wget "$DC" "http://${HOSTPORT}/config_dump" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-config_dump.json"
+  docker_wget "$DC" "http://${HOSTPORT}/clusters?format=json" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-clusters.json"
+  docker_wget "$DC" "http://${HOSTPORT}/stats" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-stats.txt"
+}
+
+function reset_envoy_metrics {
+  local HOSTPORT=$1
+  curl -s -f -XPOST $HOSTPORT/reset_counters
+  return $?
+}
+
+function get_all_envoy_metrics {
+  local HOSTPORT=$1
+  curl -s -f $HOSTPORT/stats
+  return $?
+}
+
+function get_envoy_metrics {
+  local HOSTPORT=$1
+  local METRICS=$2
+
+  get_all_envoy_metrics $HOSTPORT | grep "$METRICS"
+}
+
+function get_upstream_endpoint_in_status_count {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local HEALTH_STATUS=$3
+  run retry_default curl -s -f "http://${HOSTPORT}/clusters?format=json"
+  [ "$status" -eq 0 ]
+  # echo "$output" >&3
+  echo "$output" | jq --raw-output "
+.cluster_statuses[]
+| select(.name|startswith(\"${CLUSTER_NAME}\"))
+| [.host_statuses[].health_status.eds_health_status]
+| [select(.[] == \"${HEALTH_STATUS}\")]
+| length"
+}
+
+function assert_upstream_has_endpoints_in_status_once {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local HEALTH_STATUS=$3
+  local EXPECT_COUNT=$4
+
+  GOT_COUNT=$(get_upstream_endpoint_in_status_count $HOSTPORT $CLUSTER_NAME $HEALTH_STATUS)
+
+  [ "$GOT_COUNT" -eq $EXPECT_COUNT ]
+}
+
+function assert_upstream_has_endpoints_in_status {
+  local HOSTPORT=$1
+  local CLUSTER_NAME=$2
+  local HEALTH_STATUS=$3
+  local EXPECT_COUNT=$4
+  run retry_long assert_upstream_has_endpoints_in_status_once $HOSTPORT $CLUSTER_NAME $HEALTH_STATUS $EXPECT_COUNT
+  [ "$status" -eq 0 ]
+}
+
+function assert_envoy_metric {
+  set -eEuo pipefail
+  local HOSTPORT=$1
+  local METRIC=$2
+  local EXPECT_COUNT=$3
+
+  METRICS=$(get_envoy_metrics $HOSTPORT "$METRIC")
+
+  if [ -z "${METRICS}" ]
+  then
+    echo "Metric not found" 1>&2
+    return 1
+  fi
+
+  GOT_COUNT=$(awk -F: '{print $2}' <<< "$METRICS" | head -n 1 | tr -d ' ')
+
+  if [ -z "$GOT_COUNT" ]
+  then
+    echo "Couldn't parse metric count" 1>&2
+    return 1
+  fi
+
+  if [ $EXPECT_COUNT -ne $GOT_COUNT ]
+  then
+    echo "$METRIC - expected count: $EXPECT_COUNT, actual count: $GOT_COUNT" 1>&2
+    return 1
+  fi
+}
+
+function assert_envoy_metric_at_least {
+  set -eEuo pipefail
+  local HOSTPORT=$1
+  local METRIC=$2
+  local EXPECT_COUNT=$3
+
+  METRICS=$(get_envoy_metrics $HOSTPORT "$METRIC")
+
+  if [ -z "${METRICS}" ]
+  then
+    echo "Metric not found" 1>&2
+    return 1
+  fi
+
+  GOT_COUNT=$(awk -F: '{print $2}' <<< "$METRICS" | head -n 1 | tr -d ' ')
+
+  if [ -z "$GOT_COUNT" ]
+  then
+    echo "Couldn't parse metric count" 1>&2
+    return 1
+  fi
+
+  if [ $EXPECT_COUNT -gt $GOT_COUNT ]
+  then
+    echo "$METRIC - expected >= count: $EXPECT_COUNT, actual count: $GOT_COUNT" 1>&2
+    return 1
+  fi
+}
+
+function assert_envoy_aggregate_metric_at_least {
+  set -eEuo pipefail
+  local HOSTPORT=$1
+  local METRIC=$2
+  local EXPECT_COUNT=$3
+
+  METRICS=$(get_envoy_metrics $HOSTPORT "$METRIC")
+
+  if [ -z "${METRICS}" ]
+  then
+    echo "Metric not found" 1>&2
+    return 1
+  fi
+
+  GOT_COUNT=$(awk '{ sum += $2 } END { print sum }' <<< "$METRICS")
+
+  if [ -z "$GOT_COUNT" ]
+  then
+    echo "Couldn't parse metric count" 1>&2
+    return 1
+  fi
+
+  if [ $EXPECT_COUNT -gt $GOT_COUNT ]
+  then
+    echo "$METRIC - expected >= count: $EXPECT_COUNT, actual count: $GOT_COUNT" 1>&2
+    return 1
+  fi
+}
+
+function get_healthy_service_count {
+  local SERVICE_NAME=$1
+  local DC=$2
+  local NS=$3
+
+  run retry_default curl -s -f ${HEADERS} "127.0.0.1:8500/v1/health/connect/${SERVICE_NAME}?dc=${DC}&passing&ns=${NS}"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output '. | length'
+}
+
+function assert_service_has_healthy_instances_once {
+  local SERVICE_NAME=$1
+  local EXPECT_COUNT=$2
+  local DC=${3:-primary}
+  local NS=$4
+
+  GOT_COUNT=$(get_healthy_service_count "$SERVICE_NAME" "$DC" "$NS")
+
+  [ "$GOT_COUNT" -eq $EXPECT_COUNT ]
+}
+
+function assert_service_has_healthy_instances {
+  local SERVICE_NAME=$1
+  local EXPECT_COUNT=$2
+  local DC=${3:-primary}
+  local NS=$4
+
+  run retry_long assert_service_has_healthy_instances_once "$SERVICE_NAME" "$EXPECT_COUNT" "$DC" "$NS"
+  [ "$status" -eq 0 ]
+}
+
+function check_intention {
+  local SOURCE=$1
+  local DESTINATION=$2
+
+  curl -s -f "localhost:8500/v1/connect/intentions/check?source=${SOURCE}&destination=${DESTINATION}" | jq ".Allowed"
+}
+
+function assert_intention_allowed {
+  local SOURCE=$1
+  local DESTINATION=$2
+
+  [ "$(check_intention "${SOURCE}" "${DESTINATION}")" == "true" ]
+}
+
+function assert_intention_denied {
+  local SOURCE=$1
+  local DESTINATION=$2
+
+  [ "$(check_intention "${SOURCE}" "${DESTINATION}")" == "false" ]
+}
+
 function docker_consul {
-  docker run -ti --rm --network container:envoy_consul_1 consul-dev $@
+  local DC=$1
+  shift 1
+  docker run -i --rm --network container:envoy_consul-${DC}_1 consul-dev "$@"
+}
+
+function docker_wget {
+  local DC=$1
+  shift 1
+  docker run -ti --rm --network container:envoy_consul-${DC}_1 alpine:3.9 wget "$@"
+}
+
+function docker_curl {
+  local DC=$1
+  shift 1
+  docker run -ti --rm --network container:envoy_consul-${DC}_1 --entrypoint curl consul-dev "$@"
+}
+
+function docker_exec {
+  if ! docker exec -i "$@"
+  then
+    echo "Failed to execute: docker exec -i $@" 1>&2
+    return 1
+  fi
+}
+
+function docker_consul_exec {
+  local DC=$1
+  shift 1
+  docker_exec envoy_consul-${DC}_1 "$@"
+}
+
+function get_envoy_pid {
+  local BOOTSTRAP_NAME=$1
+  local DC=${2:-primary}
+  run ps aux
+  [ "$status" == 0 ]
+  echo "$output" 1>&2
+  PID="$(echo "$output" | grep "envoy -c /workdir/$DC/envoy/${BOOTSTRAP_NAME}-bootstrap.json" | awk '{print $1}')"
+  [ -n "$PID" ]
+
+  echo "$PID"
+}
+
+function kill_envoy {
+  local BOOTSTRAP_NAME=$1
+  local DC=${2:-primary}
+
+  PID="$(get_envoy_pid $BOOTSTRAP_NAME "$DC")"
+  echo "PID = $PID"
+
+  kill -TERM $PID
 }
 
 function must_match_in_statsd_logs {
-  run cat /workdir/statsd/statsd.log
+  local DC=${2:-primary}
+
+  run cat /workdir/${DC}/statsd/statsd.log
+  echo "$output"
   COUNT=$( echo "$output" | grep -Ec $1 )
 
   echo "COUNT of '$1' matches: $COUNT"
@@ -132,6 +453,18 @@ function must_match_in_prometheus_response {
   echo "OUTPUT head -n 10"
   echo "$output" | head -n 10
   echo "COUNT of '$2' matches: $COUNT"
+
+  [ "$status" == 0 ]
+  [ "$COUNT" -gt "0" ]
+}
+
+function must_match_in_stats_proxy_response {
+  run curl -f -s $1/$2
+  COUNT=$( echo "$output" | grep -Ec $3 )
+
+  echo "OUTPUT head -n 10"
+  echo "$output" | head -n 10
+  echo "COUNT of '$3' matches: $COUNT"
 
   [ "$status" == 0 ]
   [ "$COUNT" -gt "0" ]
@@ -170,18 +503,137 @@ function must_fail_http_connection {
 function gen_envoy_bootstrap {
   SERVICE=$1
   ADMIN_PORT=$2
+  DC=${3:-primary}
+  IS_MGW=${4:-0}
+  EXTRA_ENVOY_BS_ARGS="${5-}"
 
-  if output=$(docker_consul connect envoy -bootstrap \
-    -proxy-id $SERVICE-sidecar-proxy \
-    -admin-bind 0.0.0.0:$ADMIN_PORT 2>&1); then
+  PROXY_ID="$SERVICE"
+  if ! is_set "$IS_MGW"
+  then
+    PROXY_ID="$SERVICE-sidecar-proxy"
+  fi
+
+  if output=$(docker_consul "$DC" connect envoy -bootstrap \
+    -proxy-id $PROXY_ID \
+    -envoy-version "$ENVOY_VERSION" \
+    -admin-bind 0.0.0.0:$ADMIN_PORT ${EXTRA_ENVOY_BS_ARGS} 2>&1); then
 
     # All OK, write config to file
-    echo "$output" > workdir/envoy/$SERVICE-bootstrap.json
+    echo "$output" > workdir/${DC}/envoy/$SERVICE-bootstrap.json
   else
     status=$?
     # Command failed, instead of swallowing error (printed on stdout by docker
     # it seems) by writing it to file, echo it
     echo "$output"
     return $status
+  fi
+}
+
+function read_config_entry {
+  local KIND=$1
+  local NAME=$2
+  local DC=${3:-primary}
+
+  docker_consul "$DC" config read -kind $KIND -name $NAME
+}
+
+function wait_for_config_entry {
+  retry_default read_config_entry "$@" >/dev/null
+}
+
+function delete_config_entry {
+  local KIND=$1
+  local NAME=$2
+  retry_default curl -sL -XDELETE "http://127.0.0.1:8500/v1/config/${KIND}/${NAME}"
+}
+
+function list_intentions {
+  curl -s -f "http://localhost:8500/v1/connect/intentions"
+}
+
+function get_intention_target_name {
+  awk -F / '{ if ( NF == 1 ) { print $0 } else { print $2 }}'
+}
+
+function get_intention_target_namespace {
+  awk -F / '{ if ( NF != 1 ) { print $1 } }'
+}
+
+function get_intention_by_targets {
+  local SOURCE=$1
+  local DESTINATION=$2
+
+  local SOURCE_NS=$(get_intention_target_namespace <<< "${SOURCE}")
+  local SOURCE_NAME=$(get_intention_target_name <<< "${SOURCE}")
+  local DESTINATION_NS=$(get_intention_target_namespace <<< "${DESTINATION}")
+  local DESTINATION_NAME=$(get_intention_target_name <<< "${DESTINATION}")
+
+  existing=$(list_intentions | jq ".[] | select(.SourceNS == \"$SOURCE_NS\" and .SourceName == \"$SOURCE_NAME\" and .DestinationNS == \"$DESTINATION_NS\" and .DestinationName == \"$DESTINATION_NAME\")")
+  if test -z "$existing"
+  then
+    return 1
+  fi
+  echo "$existing"
+  return 0
+}
+
+function update_intention {
+  local SOURCE=$1
+  local DESTINATION=$2
+  local ACTION=$3
+
+  intention=$(get_intention_by_targets "${SOURCE}" "${DESTINATION}")
+  if test $? -ne 0
+  then
+    return 1
+  fi
+
+  id=$(jq -r .ID <<< "${intention}")
+  updated=$(jq ".Action = \"$ACTION\"" <<< "${intention}")
+
+  curl -s -X PUT "http://localhost:8500/v1/connect/intentions/${id}" -d "${updated}"
+  return $?
+}
+
+function wait_for_agent_service_register {
+  local SERVICE_ID=$1
+  local DC=${2:-primary}
+  retry_default docker_curl "$DC" -sLf "http://127.0.0.1:8500/v1/agent/service/${SERVICE_ID}" >/dev/null
+}
+
+function set_ttl_check_state {
+  local CHECK_ID=$1
+  local CHECK_STATE=$2
+  local DC=${3:-primary}
+
+  case "$CHECK_STATE" in
+    pass)
+      ;;
+    warn)
+      ;;
+    fail)
+      ;;
+    *)
+      echo "invalid ttl check state '${CHECK_STATE}'" >&2
+      return 1
+  esac
+
+  retry_default docker_curl "${DC}" -sL -XPUT "http://localhost:8500/v1/agent/check/warn/${CHECK_ID}"
+}
+
+function get_upstream_fortio_name {
+  run retry_default curl -v -s -f localhost:5000/debug?env=dump
+  [ "$status" == 0 ]
+  echo "$output" | grep -E "^FORTIO_NAME="
+}
+
+function assert_expected_fortio_name {
+  local EXPECT_NAME=$1
+
+  GOT=$(get_upstream_fortio_name)
+
+  if [ "$GOT" != "FORTIO_NAME=${EXPECT_NAME}" ]; then
+    echo "expected name: $EXPECT_NAME, actual name: $GOT" 1>&2
+    return 1
   fi
 }

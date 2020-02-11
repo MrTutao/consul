@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
@@ -13,8 +12,9 @@ import (
 	"fmt"
 	"math/big"
 	"net"
-	"strings"
 	"time"
+
+	"github.com/hashicorp/consul/agent/connect"
 )
 
 // GenerateSerialNumber returns random bigint generated with crypto/rand
@@ -29,23 +29,7 @@ func GenerateSerialNumber() (*big.Int, error) {
 
 // GeneratePrivateKey generates a new ecdsa private key
 func GeneratePrivateKey() (crypto.Signer, string, error) {
-	pk, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, "", fmt.Errorf("error generating private key: %s", err)
-	}
-
-	bs, err := x509.MarshalECPrivateKey(pk)
-	if err != nil {
-		return nil, "", fmt.Errorf("error generating private key: %s", err)
-	}
-
-	var buf bytes.Buffer
-	err = pem.Encode(&buf, &pem.Block{Type: "EC PRIVATE KEY", Bytes: bs})
-	if err != nil {
-		return nil, "", fmt.Errorf("error encoding private key: %s", err)
-	}
-
-	return pk, buf.String(), nil
+	return connect.GeneratePrivateKey()
 }
 
 // GenerateCA generates a new CA for agent TLS (not to be confused with Connect TLS)
@@ -160,7 +144,7 @@ func keyID(raw interface{}) ([]byte, error) {
 
 	// String formatted
 	kID := sha256.Sum256(bs)
-	return []byte(strings.Replace(fmt.Sprintf("% x", kID), " ", ":", -1)), nil
+	return kID[:], nil
 }
 
 func parseCert(pemValue string) (*x509.Certificate, error) {

@@ -13,13 +13,12 @@ import (
 	"strconv"
 	"strings"
 
-	proxyAgent "github.com/hashicorp/consul/agent/proxyprocess"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/command/flags"
 	proxyImpl "github.com/hashicorp/consul/connect/proxy"
+	"github.com/hashicorp/go-hclog"
 
-	"github.com/hashicorp/consul/logger"
-	"github.com/hashicorp/logutils"
+	"github.com/hashicorp/consul/logging"
 	"github.com/mitchellh/cli"
 )
 
@@ -44,12 +43,12 @@ type cmd struct {
 
 	shutdownCh <-chan struct{}
 
-	logFilter *logutils.LevelFilter
 	logOutput io.Writer
-	logger    *log.Logger
+	logger    hclog.Logger
 
 	// flags
 	logLevel    string
+	logJSON     bool
 	cfgFile     string
 	proxyID     string
 	sidecarFor  string
@@ -79,6 +78,9 @@ func (c *cmd) init() {
 
 	c.flags.StringVar(&c.logLevel, "log-level", "INFO",
 		"Specifies the log level.")
+
+	c.flags.BoolVar(&c.logJSON, "log-json", false,
+		"Output logs in JSON format.")
 
 	c.flags.StringVar(&c.pprofAddr, "pprof-addr", "",
 		"Enable debugging via pprof. Providing a host:port (or just ':port') "+
@@ -124,26 +126,25 @@ func (c *cmd) Run(args []string) int {
 
 	// Load the proxy ID and token from env vars if they're set
 	if c.proxyID == "" {
-		c.proxyID = os.Getenv(proxyAgent.EnvProxyID)
+		c.proxyID = os.Getenv("CONNECT_PROXY_ID")
 	}
 	if c.sidecarFor == "" {
-		c.sidecarFor = os.Getenv(proxyAgent.EnvSidecarFor)
-	}
-	if c.http.Token() == "" && c.http.TokenFile() == "" {
-		c.http.SetToken(os.Getenv(proxyAgent.EnvProxyToken))
+		c.sidecarFor = os.Getenv("CONNECT_SIDECAR_FOR")
 	}
 
 	// Setup the log outputs
-	logConfig := &logger.Config{
+	logConfig := &logging.Config{
 		LogLevel: c.logLevel,
+		Name:     logging.Proxy,
+		LogJSON:  c.logJSON,
 	}
-	logFilter, logGate, _, logOutput, ok := logger.Setup(logConfig, c.UI)
+	logger, logGate, logOutput, ok := logging.Setup(logConfig, c.UI)
 	if !ok {
 		return 1
 	}
-	c.logFilter = logFilter
 	c.logOutput = logOutput
-	c.logger = log.New(logOutput, "", log.LstdFlags)
+
+	c.logger = logger
 
 	// Enable Pprof if needed
 	if c.pprofAddr != "" {
@@ -247,6 +248,33 @@ func LookupProxyIDForSidecar(client *api.Client, sidecarFor string) (string, err
 	return proxyIDs[0], nil
 }
 
+// LookupGatewayProxyID finds the mesh-gateway service registered with the local
+// agent if any and returns its service ID. It will return an ID if and only if
+// there is exactly one registered mesh-gateway registered to the agent.
+func LookupGatewayProxy(client *api.Client) (*api.AgentService, error) {
+	svcs, err := client.Agent().ServicesWithFilter("Kind == `mesh-gateway`")
+	if err != nil {
+		return nil, fmt.Errorf("Failed looking up mesh-gateway instances: %v", err)
+	}
+
+	var proxyIDs []string
+	for _, svc := range svcs {
+		proxyIDs = append(proxyIDs, svc.ID)
+	}
+
+	switch len(svcs) {
+	case 0:
+		return nil, fmt.Errorf("No mesh-gateway services registered with this agent")
+	case 1:
+		for _, svc := range svcs {
+			return svc, nil
+		}
+		return nil, fmt.Errorf("This should be unreachable")
+	default:
+		return nil, fmt.Errorf("Cannot lookup the mesh-gateway's proxy ID because multiple are registered with the agent")
+	}
+}
+
 func (c *cmd) configWatcher(client *api.Client) (proxyImpl.ConfigWatcher, error) {
 	// Use the configured proxy ID
 	if c.proxyID != "" {
@@ -338,7 +366,7 @@ func (c *cmd) registerMonitor(client *api.Client) (*RegisterMonitor, error) {
 		return nil, err
 	}
 
-	m := NewRegisterMonitor()
+	m := NewRegisterMonitor(c.logger)
 	m.Logger = c.logger
 	m.Client = client
 	m.Service = c.service
@@ -382,7 +410,7 @@ Usage: consul connect proxy [options]
   a non-Connect-aware application to use Connect.
 
   The proxy requires service:write permissions for the service it represents.
-  The token may be passed via the CLI or the CONSUL_TOKEN environment
+  The token may be passed via the CLI or the CONSUL_HTTP_TOKEN environment
   variable.
 
   Consul can automatically start and manage this proxy by specifying the

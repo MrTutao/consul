@@ -1,10 +1,12 @@
 package structs
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/api"
@@ -144,7 +146,17 @@ func testServiceNode(t *testing.T) *ServiceNode {
 		ServiceName:    "dogs",
 		ServiceTags:    []string{"prod", "v1"},
 		ServiceAddress: "127.0.0.2",
-		ServicePort:    8080,
+		ServiceTaggedAddresses: map[string]ServiceAddress{
+			"lan": ServiceAddress{
+				Address: "127.0.0.2",
+				Port:    8080,
+			},
+			"wan": ServiceAddress{
+				Address: "198.18.0.1",
+				Port:    80,
+			},
+		},
+		ServicePort: 8080,
 		ServiceMeta: map[string]string{
 			"service": "metadata",
 		},
@@ -154,12 +166,6 @@ func testServiceNode(t *testing.T) *ServiceNode {
 			ModifyIndex: 2,
 		},
 		ServiceProxy: TestConnectProxyConfig(t),
-		// DEPRECATED (ProxyDestination) - remove this when removing ProxyDestination
-		// ServiceProxyDestination is deprecated bit must be set consistently with
-		// the value of ServiceProxy.DestinationServiceName otherwise a round-trip
-		// through ServiceNode -> NodeService and back will not match and fail
-		// tests.
-		ServiceProxyDestination: "web",
 		ServiceConnect: ServiceConnect{
 			Native: true,
 		},
@@ -238,9 +244,9 @@ func TestStructs_ServiceNode_IsSameService(t *testing.T) {
 	serviceTags := sn.ServiceTags
 	serviceWeights := Weights{Passing: 2, Warning: 1}
 	sn.ServiceWeights = serviceWeights
-	serviceProxyDestination := sn.ServiceProxyDestination
 	serviceProxy := sn.ServiceProxy
 	serviceConnect := sn.ServiceConnect
+	serviceTaggedAddresses := sn.ServiceTaggedAddresses
 
 	n := sn.ToNodeService().ToServiceNode(node)
 	other := sn.ToNodeService().ToServiceNode(node)
@@ -270,11 +276,11 @@ func TestStructs_ServiceNode_IsSameService(t *testing.T) {
 	check(func() { other.ServiceMeta = map[string]string{"my": "meta"} }, func() { other.ServiceMeta = serviceMeta })
 	check(func() { other.ServiceName = "duck" }, func() { other.ServiceName = serviceName })
 	check(func() { other.ServicePort = 65534 }, func() { other.ServicePort = servicePort })
-	check(func() { other.ServiceProxyDestination = "duck" }, func() { other.ServiceProxyDestination = serviceProxyDestination })
 	check(func() { other.ServiceTags = []string{"new", "tags"} }, func() { other.ServiceTags = serviceTags })
 	check(func() { other.ServiceWeights = Weights{Passing: 42, Warning: 41} }, func() { other.ServiceWeights = serviceWeights })
 	check(func() { other.ServiceProxy = ConnectProxyConfig{} }, func() { other.ServiceProxy = serviceProxy })
 	check(func() { other.ServiceConnect = ServiceConnect{} }, func() { other.ServiceConnect = serviceConnect })
+	check(func() { other.ServiceTaggedAddresses = nil }, func() { other.ServiceTaggedAddresses = serviceTaggedAddresses })
 }
 
 func TestStructs_ServiceNode_PartialClone(t *testing.T) {
@@ -321,6 +327,10 @@ func TestStructs_ServiceNode_PartialClone(t *testing.T) {
 	if reflect.DeepEqual(sn, clone) {
 		t.Fatalf("clone wasn't independent of the original for Meta")
 	}
+
+	// ensure that the tagged addresses were copied and not just a pointer to the map
+	sn.ServiceTaggedAddresses["foo"] = ServiceAddress{Address: "consul.is.awesome", Port: 443}
+	require.NotEqual(t, sn, clone)
 }
 
 func TestStructs_ServiceNode_Conversions(t *testing.T) {
@@ -350,6 +360,118 @@ func TestStructs_ServiceNode_Conversions(t *testing.T) {
 	}
 }
 
+func TestStructs_NodeService_ValidateMeshGateway(t *testing.T) {
+	type testCase struct {
+		Modify func(*NodeService)
+		Err    string
+	}
+	cases := map[string]testCase{
+		"valid": testCase{
+			func(x *NodeService) {},
+			"",
+		},
+		"zero-port": testCase{
+			func(x *NodeService) { x.Port = 0 },
+			"Port must be non-zero",
+		},
+		"sidecar-service": testCase{
+			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
+			"cannot have a sidecar service",
+		},
+		"proxy-destination-name": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
+			"Proxy.DestinationServiceName configuration is invalid",
+		},
+		"proxy-destination-id": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
+			"Proxy.DestinationServiceID configuration is invalid",
+		},
+		"proxy-local-address": testCase{
+			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
+			"Proxy.LocalServiceAddress configuration is invalid",
+		},
+		"proxy-local-port": testCase{
+			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
+			"Proxy.LocalServicePort configuration is invalid",
+		},
+		"proxy-upstreams": testCase{
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+			"Proxy.Upstreams configuration is invalid",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := TestNodeServiceMeshGateway(t)
+			tc.Modify(ns)
+
+			err := ns.Validate()
+			if tc.Err == "" {
+				require.NoError(t, err)
+			} else {
+				require.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tc.Err))
+			}
+		})
+	}
+}
+
+func TestStructs_NodeService_ValidateExposeConfig(t *testing.T) {
+	type testCase struct {
+		Modify func(*NodeService)
+		Err    string
+	}
+	cases := map[string]testCase{
+		"valid": {
+			func(x *NodeService) {},
+			"",
+		},
+		"empty path": {
+			func(x *NodeService) { x.Proxy.Expose.Paths[0].Path = "" },
+			"empty path exposed",
+		},
+		"invalid port negative": {
+			func(x *NodeService) { x.Proxy.Expose.Paths[0].ListenerPort = -1 },
+			"invalid listener port",
+		},
+		"invalid port too large": {
+			func(x *NodeService) { x.Proxy.Expose.Paths[0].ListenerPort = 65536 },
+			"invalid listener port",
+		},
+		"duplicate paths": {
+			func(x *NodeService) {
+				x.Proxy.Expose.Paths[0].Path = "/metrics"
+				x.Proxy.Expose.Paths[1].Path = "/metrics"
+			},
+			"duplicate paths exposed",
+		},
+		"duplicate ports": {
+			func(x *NodeService) {
+				x.Proxy.Expose.Paths[0].ListenerPort = 21600
+				x.Proxy.Expose.Paths[1].ListenerPort = 21600
+			},
+			"duplicate listener ports exposed",
+		},
+		"protocol not supported": {
+			func(x *NodeService) { x.Proxy.Expose.Paths[0].Protocol = "foo" },
+			"protocol 'foo' not supported for path",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := TestNodeServiceExpose(t)
+			tc.Modify(ns)
+
+			err := ns.Validate()
+			if tc.Err == "" {
+				require.NoError(t, err)
+			} else {
+				require.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tc.Err))
+			}
+		})
+	}
+}
+
 func TestStructs_NodeService_ValidateConnectProxy(t *testing.T) {
 	cases := []struct {
 		Name   string
@@ -363,19 +485,19 @@ func TestStructs_NodeService_ValidateConnectProxy(t *testing.T) {
 		},
 
 		{
-			"connect-proxy: no ProxyDestination",
+			"connect-proxy: no Proxy.DestinationServiceName",
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "" },
 			"Proxy.DestinationServiceName must be",
 		},
 
 		{
-			"connect-proxy: whitespace ProxyDestination",
+			"connect-proxy: whitespace Proxy.DestinationServiceName",
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "  " },
 			"Proxy.DestinationServiceName must be",
 		},
 
 		{
-			"connect-proxy: valid ProxyDestination",
+			"connect-proxy: valid Proxy.DestinationServiceName",
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "hello" },
 			"",
 		},
@@ -390,6 +512,206 @@ func TestStructs_NodeService_ValidateConnectProxy(t *testing.T) {
 			"connect-proxy: ConnectNative set",
 			func(x *NodeService) { x.Connect.Native = true },
 			"cannot also be",
+		},
+
+		{
+			"connect-proxy: upstream missing type (defaulted)",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{{
+					DestinationName: "foo",
+					LocalBindPort:   5000,
+				}}
+			},
+			"",
+		},
+		{
+			"connect-proxy: upstream invalid type",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{{
+					DestinationType: "garbage",
+					DestinationName: "foo",
+					LocalBindPort:   5000,
+				}}
+			},
+			"unknown upstream destination type",
+		},
+		{
+			"connect-proxy: upstream empty name",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{{
+					DestinationType: UpstreamDestTypeService,
+					LocalBindPort:   5000,
+				}}
+			},
+			"upstream destination name cannot be empty",
+		},
+		{
+			"connect-proxy: upstream empty bind port",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{{
+					DestinationType: UpstreamDestTypeService,
+					DestinationName: "foo",
+					LocalBindPort:   0,
+				}}
+			},
+			"upstream local bind port cannot be zero",
+		},
+		{
+			"connect-proxy: Upstreams almost-but-not-quite-duplicated in various ways",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{ // baseline
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5000,
+					},
+					{ // different bind address
+						DestinationType:  UpstreamDestTypeService,
+						DestinationName:  "bar",
+						LocalBindAddress: "127.0.0.2",
+						LocalBindPort:    5000,
+					},
+					{ // different datacenter
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						Datacenter:      "dc2",
+						LocalBindPort:   5001,
+					},
+					{ // explicit default namespace
+						DestinationType:      UpstreamDestTypeService,
+						DestinationName:      "foo",
+						DestinationNamespace: "default",
+						LocalBindPort:        5003,
+					},
+					{ // different namespace
+						DestinationType:      UpstreamDestTypeService,
+						DestinationName:      "foo",
+						DestinationNamespace: "alternate",
+						LocalBindPort:        5002,
+					},
+					{ // different type
+						DestinationType: UpstreamDestTypePreparedQuery,
+						DestinationName: "foo",
+						LocalBindPort:   5004,
+					},
+				}
+			},
+			"",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by port",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5000,
+					},
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5000,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by ip and port",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType:  UpstreamDestTypeService,
+						DestinationName:  "foo",
+						LocalBindAddress: "127.0.0.2",
+						LocalBindPort:    5000,
+					},
+					{
+						DestinationType:  UpstreamDestTypeService,
+						DestinationName:  "bar",
+						LocalBindAddress: "127.0.0.2",
+						LocalBindPort:    5000,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by ip and port with ip defaulted in one",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5000,
+					},
+					{
+						DestinationType:  UpstreamDestTypeService,
+						DestinationName:  "foo",
+						LocalBindAddress: "127.0.0.1",
+						LocalBindPort:    5000,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by name",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5000,
+					},
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						LocalBindPort:   5001,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by name and datacenter",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						Datacenter:      "dc2",
+						LocalBindPort:   5000,
+					},
+					{
+						DestinationType: UpstreamDestTypeService,
+						DestinationName: "foo",
+						Datacenter:      "dc2",
+						LocalBindPort:   5001,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
+		},
+		{
+			"connect-proxy: Upstreams duplicated by name and namespace",
+			func(x *NodeService) {
+				x.Proxy.Upstreams = Upstreams{
+					{
+						DestinationType:      UpstreamDestTypeService,
+						DestinationName:      "foo",
+						DestinationNamespace: "alternate",
+						LocalBindPort:        5000,
+					},
+					{
+						DestinationType:      UpstreamDestTypeService,
+						DestinationName:      "foo",
+						DestinationNamespace: "alternate",
+						LocalBindPort:        5001,
+					},
+				}
+			},
+			"upstreams cannot contain duplicates",
 		},
 	}
 
@@ -437,16 +759,6 @@ func TestStructs_NodeService_ValidateSidecarService(t *testing.T) {
 			},
 			"SidecarService cannot have a nested SidecarService",
 		},
-
-		{
-			"Sidecar can't have managed proxy",
-			func(x *NodeService) {
-				x.Connect.SidecarService.Connect = &ServiceConnect{
-					Proxy: &ServiceDefinitionConnectProxy{},
-				}
-			},
-			"SidecarService cannot have a managed proxy",
-		},
 	}
 
 	for _, tc := range cases {
@@ -472,6 +784,16 @@ func TestStructs_NodeService_IsSame(t *testing.T) {
 		Service: "theservice",
 		Tags:    []string{"foo", "bar"},
 		Address: "127.0.0.1",
+		TaggedAddresses: map[string]ServiceAddress{
+			"lan": ServiceAddress{
+				Address: "127.0.0.1",
+				Port:    3456,
+			},
+			"wan": ServiceAddress{
+				Address: "198.18.0.1",
+				Port:    1234,
+			},
+		},
 		Meta: map[string]string{
 			"meta1": "value1",
 			"meta2": "value2",
@@ -497,6 +819,16 @@ func TestStructs_NodeService_IsSame(t *testing.T) {
 		Address:           "127.0.0.1",
 		Port:              1234,
 		EnableTagOverride: true,
+		TaggedAddresses: map[string]ServiceAddress{
+			"wan": ServiceAddress{
+				Address: "198.18.0.1",
+				Port:    1234,
+			},
+			"lan": ServiceAddress{
+				Address: "127.0.0.1",
+				Port:    3456,
+			},
+		},
 		Meta: map[string]string{
 			// We don't care about order
 			"meta2": "value2",
@@ -559,6 +891,7 @@ func TestStructs_NodeService_IsSame(t *testing.T) {
 	if !otherServiceNode.IsSameService(otherServiceNodeCopy2) {
 		t.Fatalf("copy should be the same, but was\n %#v\nVS\n %#v", otherServiceNode, otherServiceNodeCopy2)
 	}
+	check(func() { other.TaggedAddresses["lan"] = ServiceAddress{Address: "127.0.0.1", Port: 9999} }, func() { other.TaggedAddresses["lan"] = ServiceAddress{Address: "127.0.0.1", Port: 3456} })
 }
 
 func TestStructs_HealthCheck_IsSame(t *testing.T) {
@@ -1044,4 +1377,589 @@ func TestSpecificServiceRequest_CacheInfo(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNodeService_JSON_OmitTaggedAdddresses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ns   NodeService
+	}{
+		{
+			"nil",
+			NodeService{
+				TaggedAddresses: nil,
+			},
+		},
+		{
+			"empty",
+			NodeService{
+				TaggedAddresses: make(map[string]ServiceAddress),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		name := tc.name
+		ns := tc.ns
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			data, err := json.Marshal(ns)
+			require.NoError(t, err)
+			var raw map[string]interface{}
+			err = json.Unmarshal(data, &raw)
+			require.NoError(t, err)
+			require.NotContains(t, raw, "TaggedAddresses")
+			require.NotContains(t, raw, "tagged_addresses")
+		})
+	}
+}
+
+func TestServiceNode_JSON_OmitServiceTaggedAdddresses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		sn   ServiceNode
+	}{
+		{
+			"nil",
+			ServiceNode{
+				ServiceTaggedAddresses: nil,
+			},
+		},
+		{
+			"empty",
+			ServiceNode{
+				ServiceTaggedAddresses: make(map[string]ServiceAddress),
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		name := tc.name
+		sn := tc.sn
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			data, err := json.Marshal(sn)
+			require.NoError(t, err)
+			var raw map[string]interface{}
+			err = json.Unmarshal(data, &raw)
+			require.NoError(t, err)
+			require.NotContains(t, raw, "ServiceTaggedAddresses")
+			require.NotContains(t, raw, "service_tagged_addresses")
+		})
+	}
+}
+
+func TestNode_BestAddress(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		input   Node
+		lanAddr string
+		wanAddr string
+	}
+
+	nodeAddr := "10.1.2.3"
+	nodeWANAddr := "198.18.19.20"
+
+	cases := map[string]testCase{
+		"address": testCase{
+			input: Node{
+				Address: nodeAddr,
+			},
+
+			lanAddr: nodeAddr,
+			wanAddr: nodeAddr,
+		},
+		"wan-address": testCase{
+			input: Node{
+				Address: nodeAddr,
+				TaggedAddresses: map[string]string{
+					"wan": nodeWANAddr,
+				},
+			},
+
+			lanAddr: nodeAddr,
+			wanAddr: nodeWANAddr,
+		},
+	}
+
+	for name, tc := range cases {
+		name := name
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			require.Equal(t, tc.lanAddr, tc.input.BestAddress(false))
+			require.Equal(t, tc.wanAddr, tc.input.BestAddress(true))
+		})
+	}
+}
+
+func TestNodeService_BestAddress(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		input   NodeService
+		lanAddr string
+		lanPort int
+		wanAddr string
+		wanPort int
+	}
+
+	serviceAddr := "10.2.3.4"
+	servicePort := 1234
+	serviceWANAddr := "198.19.20.21"
+	serviceWANPort := 987
+
+	cases := map[string]testCase{
+		"no-address": testCase{
+			input: NodeService{
+				Port: servicePort,
+			},
+
+			lanAddr: "",
+			lanPort: servicePort,
+			wanAddr: "",
+			wanPort: servicePort,
+		},
+		"service-address": testCase{
+			input: NodeService{
+				Address: serviceAddr,
+				Port:    servicePort,
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceAddr,
+			wanPort: servicePort,
+		},
+		"service-wan-address": testCase{
+			input: NodeService{
+				Address: serviceAddr,
+				Port:    servicePort,
+				TaggedAddresses: map[string]ServiceAddress{
+					"wan": ServiceAddress{
+						Address: serviceWANAddr,
+						Port:    serviceWANPort,
+					},
+				},
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: serviceWANPort,
+		},
+		"service-wan-address-default-port": testCase{
+			input: NodeService{
+				Address: serviceAddr,
+				Port:    servicePort,
+				TaggedAddresses: map[string]ServiceAddress{
+					"wan": ServiceAddress{
+						Address: serviceWANAddr,
+						Port:    0,
+					},
+				},
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: servicePort,
+		},
+		"service-wan-address-node-lan": testCase{
+			input: NodeService{
+				Port: servicePort,
+				TaggedAddresses: map[string]ServiceAddress{
+					"wan": ServiceAddress{
+						Address: serviceWANAddr,
+						Port:    serviceWANPort,
+					},
+				},
+			},
+
+			lanAddr: "",
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: serviceWANPort,
+		},
+	}
+
+	for name, tc := range cases {
+		name := name
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			addr, port := tc.input.BestAddress(false)
+			require.Equal(t, tc.lanAddr, addr)
+			require.Equal(t, tc.lanPort, port)
+
+			addr, port = tc.input.BestAddress(true)
+			require.Equal(t, tc.wanAddr, addr)
+			require.Equal(t, tc.wanPort, port)
+		})
+	}
+}
+
+func TestCheckServiceNode_BestAddress(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		input   CheckServiceNode
+		lanAddr string
+		lanPort int
+		wanAddr string
+		wanPort int
+	}
+
+	nodeAddr := "10.1.2.3"
+	nodeWANAddr := "198.18.19.20"
+	serviceAddr := "10.2.3.4"
+	servicePort := 1234
+	serviceWANAddr := "198.19.20.21"
+	serviceWANPort := 987
+
+	cases := map[string]testCase{
+		"node-address": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+				},
+				Service: &NodeService{
+					Port: servicePort,
+				},
+			},
+
+			lanAddr: nodeAddr,
+			lanPort: servicePort,
+			wanAddr: nodeAddr,
+			wanPort: servicePort,
+		},
+		"node-wan-address": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+					TaggedAddresses: map[string]string{
+						"wan": nodeWANAddr,
+					},
+				},
+				Service: &NodeService{
+					Port: servicePort,
+				},
+			},
+
+			lanAddr: nodeAddr,
+			lanPort: servicePort,
+			wanAddr: nodeWANAddr,
+			wanPort: servicePort,
+		},
+		"service-address": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+					// this will be ignored
+					TaggedAddresses: map[string]string{
+						"wan": nodeWANAddr,
+					},
+				},
+				Service: &NodeService{
+					Address: serviceAddr,
+					Port:    servicePort,
+				},
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceAddr,
+			wanPort: servicePort,
+		},
+		"service-wan-address": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+					// this will be ignored
+					TaggedAddresses: map[string]string{
+						"wan": nodeWANAddr,
+					},
+				},
+				Service: &NodeService{
+					Address: serviceAddr,
+					Port:    servicePort,
+					TaggedAddresses: map[string]ServiceAddress{
+						"wan": ServiceAddress{
+							Address: serviceWANAddr,
+							Port:    serviceWANPort,
+						},
+					},
+				},
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: serviceWANPort,
+		},
+		"service-wan-address-default-port": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+					// this will be ignored
+					TaggedAddresses: map[string]string{
+						"wan": nodeWANAddr,
+					},
+				},
+				Service: &NodeService{
+					Address: serviceAddr,
+					Port:    servicePort,
+					TaggedAddresses: map[string]ServiceAddress{
+						"wan": ServiceAddress{
+							Address: serviceWANAddr,
+							Port:    0,
+						},
+					},
+				},
+			},
+
+			lanAddr: serviceAddr,
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: servicePort,
+		},
+		"service-wan-address-node-lan": testCase{
+			input: CheckServiceNode{
+				Node: &Node{
+					Address: nodeAddr,
+					// this will be ignored
+					TaggedAddresses: map[string]string{
+						"wan": nodeWANAddr,
+					},
+				},
+				Service: &NodeService{
+					Port: servicePort,
+					TaggedAddresses: map[string]ServiceAddress{
+						"wan": ServiceAddress{
+							Address: serviceWANAddr,
+							Port:    serviceWANPort,
+						},
+					},
+				},
+			},
+
+			lanAddr: nodeAddr,
+			lanPort: servicePort,
+			wanAddr: serviceWANAddr,
+			wanPort: serviceWANPort,
+		},
+	}
+
+	for name, tc := range cases {
+		name := name
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			addr, port := tc.input.BestAddress(false)
+			require.Equal(t, tc.lanAddr, addr)
+			require.Equal(t, tc.lanPort, port)
+
+			addr, port = tc.input.BestAddress(true)
+			require.Equal(t, tc.wanAddr, addr)
+			require.Equal(t, tc.wanPort, port)
+		})
+	}
+}
+
+func TestNodeService_JSON_Marshal(t *testing.T) {
+	ns := &NodeService{
+		Service: "foo",
+		Proxy: ConnectProxyConfig{
+			Config: map[string]interface{}{
+				"bind_addresses": map[string]interface{}{
+					"default": map[string]interface{}{
+						"Address": "0.0.0.0",
+						"Port":    "443",
+					},
+				},
+			},
+		},
+	}
+	buf, err := json.Marshal(ns)
+	require.NoError(t, err)
+
+	var out NodeService
+	require.NoError(t, json.Unmarshal(buf, &out))
+	require.Equal(t, *ns, out)
+}
+
+func TestServiceNode_JSON_Marshal(t *testing.T) {
+	sn := &ServiceNode{
+		Node:        "foo",
+		ServiceName: "foo",
+		ServiceProxy: ConnectProxyConfig{
+			Config: map[string]interface{}{
+				"bind_addresses": map[string]interface{}{
+					"default": map[string]interface{}{
+						"Address": "0.0.0.0",
+						"Port":    "443",
+					},
+				},
+			},
+		},
+	}
+	buf, err := json.Marshal(sn)
+	require.NoError(t, err)
+
+	var out ServiceNode
+	require.NoError(t, json.Unmarshal(buf, &out))
+	require.Equal(t, *sn, out)
+}
+
+// frankensteinStruct is an amalgamation of all of the different kinds of
+// fields you could have on struct defined in the agent/structs package that we
+// send through msgpack
+type frankensteinStruct struct {
+	Child      *monsterStruct
+	ChildSlice []*monsterStruct
+	ChildMap   map[string]*monsterStruct
+}
+type monsterStruct struct {
+	Bool    bool
+	Int     int
+	Uint8   uint8
+	Uint64  uint64
+	Float32 float32
+	Float64 float64
+	String  string
+
+	Hash         []byte
+	Uint32Slice  []uint32
+	Float64Slice []float64
+	StringSlice  []string
+
+	MapInt         map[string]int
+	MapString      map[string]string
+	MapStringSlice map[string][]string
+
+	// We explicitly DO NOT try to test the following types that involve
+	// interface{} as the TestMsgpackEncodeDecode test WILL fail.
+	//
+	// These are tested elsewhere for the very specific scenario in question,
+	// which usually takes a secondary trip through mapstructure during decode
+	// which papers over some of the additional conversions necessary to finish
+	// decoding.
+	// MapIface    map[string]interface{}
+	// MapMapIface map[string]map[string]interface{}
+
+	Dur     time.Duration
+	DurPtr  *time.Duration
+	Time    time.Time
+	TimePtr *time.Time
+
+	RaftIndex
+}
+
+func makeFrank() *frankensteinStruct {
+	return &frankensteinStruct{
+		Child: makeMonster(),
+		ChildSlice: []*monsterStruct{
+			makeMonster(),
+			makeMonster(),
+		},
+		ChildMap: map[string]*monsterStruct{
+			"one": makeMonster(), // only put one key in here so the map order is fixed
+		},
+	}
+}
+
+func makeMonster() *monsterStruct {
+	var d time.Duration = 9 * time.Hour
+	var t time.Time = time.Date(2008, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	return &monsterStruct{
+		Bool:    true,
+		Int:     -8,
+		Uint8:   5,
+		Uint64:  9,
+		Float32: 5.25,
+		Float64: 99.5,
+		String:  "strval",
+
+		Hash:         []byte("hello"),
+		Uint32Slice:  []uint32{1, 2, 3, 4},
+		Float64Slice: []float64{9.2, 6.25},
+		StringSlice:  []string{"foo", "bar"},
+
+		// // MapIface will hold an amalgam of what AuthMethods and
+		// // CAConfigurations use in 'Config'
+		// MapIface: map[string]interface{}{
+		// 	"Name":  "inner",
+		// 	"Dur":   "5s",
+		// 	"Bool":  true,
+		// 	"Float": 15.25,
+		// 	"Int":   int64(94),
+		// 	"Nested": map[string]string{ // this doesn't survive
+		// 		"foo": "bar",
+		// 	},
+		// },
+		// // MapMapIface    map[string]map[string]interface{}
+
+		MapInt: map[string]int{
+			"int": 5,
+		},
+		MapString: map[string]string{
+			"aaa": "bbb",
+		},
+		MapStringSlice: map[string][]string{
+			"aaa": []string{"bbb"},
+		},
+
+		Dur:     5 * time.Second,
+		DurPtr:  &d,
+		Time:    t.Add(-5 * time.Hour),
+		TimePtr: &t,
+
+		RaftIndex: RaftIndex{
+			CreateIndex: 1,
+			ModifyIndex: 3,
+		},
+	}
+}
+
+func TestStructs_MsgpackEncodeDecode_Monolith(t *testing.T) {
+	t.Run("monster", func(t *testing.T) {
+		in := makeMonster()
+		TestMsgpackEncodeDecode(t, in, false)
+	})
+	t.Run("frankenstein", func(t *testing.T) {
+		in := makeFrank()
+		TestMsgpackEncodeDecode(t, in, false)
+	})
+}
+
+func TestSnapshotRequestResponse_MsgpackEncodeDecode(t *testing.T) {
+	t.Run("request", func(t *testing.T) {
+		in := &SnapshotRequest{
+			Datacenter: "foo",
+			Token:      "blah",
+			AllowStale: true,
+			Op:         SnapshotRestore,
+		}
+		TestMsgpackEncodeDecode(t, in, true)
+	})
+	t.Run("response", func(t *testing.T) {
+		in := &SnapshotResponse{
+			Error: "blah",
+			QueryMeta: QueryMeta{
+				Index:            3,
+				LastContact:      5 * time.Second,
+				KnownLeader:      true,
+				ConsistencyLevel: "default",
+			},
+		}
+		TestMsgpackEncodeDecode(t, in, true)
+	})
+
 }

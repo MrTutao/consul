@@ -80,9 +80,87 @@ const (
 			}
 		]
 	}`
+	expectedStatsListener = `{
+		"name": "envoy_metrics_listener",
+		"address": {
+			"socket_address": {
+				"address": "0.0.0.0",
+				"port_value": 9000
+			}
+		},
+		"filter_chains": [
+			{
+				"filters": [
+					{
+						"name": "envoy.http_connection_manager",
+						"config": {
+							"stat_prefix": "envoy_metrics",
+							"codec_type": "HTTP1",
+							"route_config": {
+								"name": "self_admin_route",
+								"virtual_hosts": [
+									{
+										"name": "self_admin",
+										"domains": [
+											"*"
+										],
+										"routes": [
+											{
+												"match": {
+													"prefix": "/stats"
+												},
+												"route": {
+													"cluster": "self_admin",
+													"prefix_rewrite": "/stats"
+												}
+											},
+											{
+												"match": {
+													"prefix": "/"
+												},
+												"direct_response": {
+													"status": 404
+												}
+											}
+										]
+									}
+								]
+							},
+							"http_filters": [
+								{
+									"name": "envoy.router"
+								}
+							]
+						}
+					}
+				]
+			}
+		]
+	}`
+	expectedStatsCluster = `{
+		"name": "self_admin",
+		"connect_timeout": "5s",
+		"type": "STATIC",
+		"http_protocol_options": {},
+		"hosts": [
+			{
+				"socket_address": {
+					"address": "127.0.0.1",
+					"port_value": 19000
+				}
+			}
+		]
+	}`
 )
 
 func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
+	sniTagJSON := strings.Join(sniTagJSONs, ",\n")
+	defaultStatsConfigJSON := `{
+					"stats_tags": [
+						` + sniTagJSON + `
+					],
+					"use_all_default_tags": true
+				}`
 
 	tests := []struct {
 		name     string
@@ -93,10 +171,12 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 		wantErr  bool
 	}{
 		{
-			name:     "defaults",
-			input:    BootstrapConfig{},
-			wantArgs: BootstrapTplArgs{},
-			wantErr:  false,
+			name:  "defaults",
+			input: BootstrapConfig{},
+			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
+			},
+			wantErr: false,
 		},
 		{
 			name: "extra-stats-sinks",
@@ -109,6 +189,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				}`,
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.custom_exciting_sink",
 					"config": {
@@ -123,6 +204,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				StatsdURL: "udp://127.0.0.1:9125",
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.statsd",
 					"config": {
@@ -149,6 +231,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				}`,
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.statsd",
 					"config": {
@@ -176,6 +259,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 			},
 			env: []string{"MY_STATSD_URL=udp://127.0.0.1:9125"},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.statsd",
 					"config": {
@@ -196,6 +280,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				DogstatsdURL: "udp://127.0.0.1:9125",
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.dog_statsd",
 					"config": {
@@ -216,6 +301,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				DogstatsdURL: "unix:///var/run/dogstatsd.sock",
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.dog_statsd",
 					"config": {
@@ -237,6 +323,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 			},
 			env: []string{"MY_STATSD_URL=udp://127.0.0.1:9125"},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON: defaultStatsConfigJSON,
 				StatsSinksJSON: `[{
 					"name": "envoy.dog_statsd",
 					"config": {
@@ -273,6 +360,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 			wantArgs: BootstrapTplArgs{
 				StatsConfigJSON: `{
 					"stats_tags": [
+						` + sniTagJSON + `,
 						{
 							"tag_name": "canary",
 							"fixed_value": "1"
@@ -307,6 +395,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				StaticClustersJSON: expectedPromCluster,
 				// Should add a static http listener too
 				StaticListenersJSON: expectedPromListener,
+				StatsConfigJSON:     defaultStatsConfigJSON,
 			},
 			wantErr: false,
 		},
@@ -328,6 +417,49 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				StaticClustersJSON: `{"foo":"bar"},` + expectedPromCluster,
 				// Should add a static http listener too
 				StaticListenersJSON: `{"baz":"qux"},` + expectedPromListener,
+				StatsConfigJSON:     defaultStatsConfigJSON,
+			},
+			wantErr: false,
+		},
+		{
+			name: "stats-bind-addr",
+			input: BootstrapConfig{
+				StatsBindAddr: "0.0.0.0:9000",
+			},
+			baseArgs: BootstrapTplArgs{
+				AdminBindAddress: "127.0.0.1",
+				AdminBindPort:    "19000",
+			},
+			wantArgs: BootstrapTplArgs{
+				AdminBindAddress: "127.0.0.1",
+				AdminBindPort:    "19000",
+				// Should add a static cluster for the self-proxy to admin
+				StaticClustersJSON: expectedStatsCluster,
+				// Should add a static http listener too
+				StaticListenersJSON: expectedStatsListener,
+				StatsConfigJSON:     defaultStatsConfigJSON,
+			},
+			wantErr: false,
+		},
+		{
+			name: "stats-bind-addr-with-overrides",
+			input: BootstrapConfig{
+				StatsBindAddr:       "0.0.0.0:9000",
+				StaticClustersJSON:  `{"foo":"bar"}`,
+				StaticListenersJSON: `{"baz":"qux"}`,
+			},
+			baseArgs: BootstrapTplArgs{
+				AdminBindAddress: "127.0.0.1",
+				AdminBindPort:    "19000",
+			},
+			wantArgs: BootstrapTplArgs{
+				AdminBindAddress: "127.0.0.1",
+				AdminBindPort:    "19000",
+				// Should add a static cluster for the self-proxy to admin
+				StaticClustersJSON: `{"foo":"bar"},` + expectedStatsCluster,
+				// Should add a static http listener too
+				StaticListenersJSON: `{"baz":"qux"},` + expectedStatsListener,
+				StatsConfigJSON:     defaultStatsConfigJSON,
 			},
 			wantErr: false,
 		},
@@ -337,6 +469,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				StatsFlushInterval: `10s`,
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON:    defaultStatsConfigJSON,
 				StatsFlushInterval: `10s`,
 			},
 			wantErr: false,
@@ -347,6 +480,7 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 				TracingConfigJSON: `{"foo": "bar"}`,
 			},
 			wantArgs: BootstrapTplArgs{
+				StatsConfigJSON:   defaultStatsConfigJSON,
 				TracingConfigJSON: `{"foo": "bar"}`,
 			},
 			wantErr: false,
@@ -355,6 +489,13 @@ func TestBootstrapConfig_ConfigureArgs(t *testing.T) {
 			name: "err-bad-prometheus-addr",
 			input: BootstrapConfig{
 				PrometheusBindAddr: "asdasdsad",
+			},
+			wantErr: true,
+		},
+		{
+			name: "err-bad-stats-addr",
+			input: BootstrapConfig{
+				StatsBindAddr: "asdasdsad",
 			},
 			wantErr: true,
 		},

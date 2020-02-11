@@ -2,6 +2,7 @@ package envoy
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -55,6 +56,14 @@ type BootstrapConfig struct {
 	// master incompatible with the current release of Consul Connect. This will
 	// be fixed in a future Consul version as Envoy 1.10 reaches stable release.
 	PrometheusBindAddr string `mapstructure:"envoy_prometheus_bind_addr"`
+
+	// StatsBindAddr configures an <ip>:<port> on which the Envoy will listen
+	// and expose the /stats HTTP path prefix for any agent to access. It
+	// does this by proxying that path prefix to the internal admin server
+	// which allows exposing metrics on the network without the security
+	// risk of exposing the full admin server API. Any other URL requested will be
+	// a 404.
+	StatsBindAddr string `mapstructure:"envoy_stats_bind_addr"`
 
 	// OverrideJSONTpl allows replacing the base template used to render the
 	// bootstrap. This is an "escape hatch" allowing arbitrary control over the
@@ -149,7 +158,13 @@ func (c *BootstrapConfig) GenerateJSON(args *BootstrapTplArgs) ([]byte, error) {
 		return nil, err
 	}
 
-	return buf.Bytes(), nil
+	// Pretty print the JSON.
+	var buf2 bytes.Buffer
+	if err := json.Indent(&buf2, buf.Bytes(), "", "  "); err != nil {
+		return nil, err
+	}
+
+	return buf2.Bytes(), nil
 }
 
 // ConfigureArgs takes the basic template arguments generated from the command
@@ -181,7 +196,13 @@ func (c *BootstrapConfig) ConfigureArgs(args *BootstrapTplArgs) error {
 	}
 	// Setup prometheus if needed. This MUST happen after the Static*JSON is set above
 	if c.PrometheusBindAddr != "" {
-		if err := c.generatePrometheusConfig(args); err != nil {
+		if err := c.generateMetricsListenerConfig(args, c.PrometheusBindAddr, "envoy_prometheus_metrics", "path", "/metrics", "/stats/prometheus"); err != nil {
+			return err
+		}
+	}
+	// Setup /stats proxy listener if needed. This MUST happen after the Static*JSON is set above
+	if c.StatsBindAddr != "" {
+		if err := c.generateMetricsListenerConfig(args, c.StatsBindAddr, "envoy_metrics", "prefix", "/stats", "/stats"); err != nil {
 			return err
 		}
 	}
@@ -265,6 +286,49 @@ func (c *BootstrapConfig) generateStatsSinkJSON(name string, addr string) (strin
 	}`, nil
 }
 
+var sniTagJSONs []string
+
+func init() {
+	// <subset>.<service>.<namespace>.<datacenter>.<internal|external>.<trustdomain>.consul
+	// - cluster.pong.default.dc2.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul.bind_errors: 0
+	// - cluster.f8f8f8f8~pong.default.dc2.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul.bind_errors: 0
+	// - cluster.v2.pong.default.dc2.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul.bind_errors: 0
+	// - cluster.f8f8f8f8~v2.pong.default.dc2.internal.e5b08d03-bfc3-c870-1833-baddb116e648.consul.bind_errors: 0
+	const PART = `[^.]+`
+	rules := [][]string{
+		{"consul.custom_hash",
+			fmt.Sprintf(`^cluster\.((?:(%s)~)?(?:%s\.)?%s\.%s\.%s\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.service_subset",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:(%s)\.)?%s\.%s\.%s\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.service",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:%s\.)?(%s)\.%s\.%s\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.namespace",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:%s\.)?%s\.(%s)\.%s\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.datacenter",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:%s\.)?%s\.%s\.(%s)\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.routing_type",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:%s\.)?%s\.%s\.%s\.(%s)\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)}, // internal:true/false would be idea
+		{"consul.trust_domain",
+			fmt.Sprintf(`^cluster\.((?:%s~)?(?:%s\.)?%s\.%s\.%s\.%s\.(%s)\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.target",
+			fmt.Sprintf(`^cluster\.(((?:%s~)?(?:%s\.)?%s\.%s\.%s)\.%s\.%s\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+		{"consul.full_target",
+			fmt.Sprintf(`^cluster\.(((?:%s~)?(?:%s\.)?%s\.%s\.%s\.%s\.%s)\.consul\.)`, PART, PART, PART, PART, PART, PART, PART)},
+	}
+
+	for _, rule := range rules {
+		m := map[string]string{
+			"tag_name": rule[0],
+			"regex":    rule[1],
+		}
+		d, err := json.Marshal(m)
+		if err != nil {
+			panic("error pregenerating SNI envoy tags: " + err.Error())
+		}
+		sniTagJSONs = append(sniTagJSONs, string(d))
+	}
+}
+
 func (c *BootstrapConfig) generateStatsConfig(args *BootstrapTplArgs) error {
 	var tagJSONs []string
 
@@ -272,6 +336,9 @@ func (c *BootstrapConfig) generateStatsConfig(args *BootstrapTplArgs) error {
 	defaults := map[string]string{
 		"local_cluster": args.ProxyCluster,
 	}
+
+	// Explode SNI portions.
+	tagJSONs = append(tagJSONs, sniTagJSONs...)
 
 	for _, tag := range c.StatsTags {
 		parts := strings.SplitN(tag, "=", 2)
@@ -316,10 +383,10 @@ func (c *BootstrapConfig) generateStatsConfig(args *BootstrapTplArgs) error {
 	return nil
 }
 
-func (c *BootstrapConfig) generatePrometheusConfig(args *BootstrapTplArgs) error {
-	host, port, err := net.SplitHostPort(c.PrometheusBindAddr)
+func (c *BootstrapConfig) generateMetricsListenerConfig(args *BootstrapTplArgs, bindAddr, name, matchType, matchValue, prefixRewrite string) error {
+	host, port, err := net.SplitHostPort(bindAddr)
 	if err != nil {
-		return fmt.Errorf("invalid prometheus_bind_addr: %s", err)
+		return fmt.Errorf("invalid %s bind address: %s", name, err)
 	}
 
 	clusterJSON := `{
@@ -337,7 +404,7 @@ func (c *BootstrapConfig) generatePrometheusConfig(args *BootstrapTplArgs) error
 		]
 	}`
 	listenerJSON := `{
-		"name": "envoy_prometheus_metrics_listener",
+		"name": "` + name + `_listener",
 		"address": {
 			"socket_address": {
 				"address": "` + host + `",
@@ -350,7 +417,7 @@ func (c *BootstrapConfig) generatePrometheusConfig(args *BootstrapTplArgs) error
 					{
 						"name": "envoy.http_connection_manager",
 						"config": {
-							"stat_prefix": "envoy_prometheus_metrics",
+							"stat_prefix": "` + name + `",
 							"codec_type": "HTTP1",
 							"route_config": {
 								"name": "self_admin_route",
@@ -363,11 +430,11 @@ func (c *BootstrapConfig) generatePrometheusConfig(args *BootstrapTplArgs) error
 										"routes": [
 											{
 												"match": {
-													"path": "/metrics"
+													"` + matchType + `": "` + matchValue + `"
 												},
 												"route": {
 													"cluster": "self_admin",
-													"prefix_rewrite": "/stats/prometheus"
+													"prefix_rewrite": "` + prefixRewrite + `"
 												}
 											},
 											{

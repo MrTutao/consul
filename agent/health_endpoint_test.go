@@ -336,6 +336,7 @@ func TestHealthServiceChecks(t *testing.T) {
 			Node:      a.Config.NodeName,
 			Name:      "consul check",
 			ServiceID: "consul",
+			Type:      "grpc",
 		},
 	}
 
@@ -356,6 +357,9 @@ func TestHealthServiceChecks(t *testing.T) {
 	nodes = obj.(structs.HealthChecks)
 	if len(nodes) != 1 {
 		t.Fatalf("bad: %v", obj)
+	}
+	if nodes[0].Type != "grpc" {
+		t.Fatalf("expected grpc check type, got %s", nodes[0].Type)
 	}
 }
 
@@ -736,7 +740,7 @@ func TestHealthServiceNodes_Filter(t *testing.T) {
 	t.Parallel()
 	a := NewTestAgent(t, t.Name(), "")
 	defer a.Shutdown()
-	testrpc.WaitForLeader(t, a.RPC, "dc1")
+	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
 	req, _ := http.NewRequest("GET", "/v1/health/service/consul?dc=dc1&filter="+url.QueryEscape("Node.Node == `test-health-node`"), nil)
 	resp := httptest.NewRecorder()
@@ -788,7 +792,7 @@ func TestHealthServiceNodes_Filter(t *testing.T) {
 
 	assertIndex(t, resp)
 
-	// Should be a non-nil empty list for checks
+	// Should be a list of checks with 1 element
 	nodes = obj.(structs.CheckServiceNodes)
 	require.Len(t, nodes, 1)
 	require.Len(t, nodes[0].Checks, 1)
@@ -970,6 +974,59 @@ func TestHealthServiceNodes_PassingFilter(t *testing.T) {
 	})
 }
 
+func TestHealthServiceNodes_CheckType(t *testing.T) {
+	t.Parallel()
+	a := NewTestAgent(t, t.Name(), "")
+	defer a.Shutdown()
+	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
+
+	req, _ := http.NewRequest("GET", "/v1/health/service/consul?dc=dc1", nil)
+	resp := httptest.NewRecorder()
+	obj, err := a.srv.HealthServiceNodes(resp, req)
+	require.NoError(t, err)
+	assertIndex(t, resp)
+
+	// Should be 1 health check for consul
+	nodes := obj.(structs.CheckServiceNodes)
+	if len(nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(nodes))
+	}
+
+	args := &structs.RegisterRequest{
+		Datacenter: "dc1",
+		Node:       a.Config.NodeName,
+		Address:    "127.0.0.1",
+		NodeMeta:   map[string]string{"somekey": "somevalue"},
+		Check: &structs.HealthCheck{
+			Node:      a.Config.NodeName,
+			Name:      "consul check",
+			ServiceID: "consul",
+			Type:      "grpc",
+		},
+	}
+
+	var out struct{}
+	require.NoError(t, a.RPC("Catalog.Register", args, &out))
+
+	req, _ = http.NewRequest("GET", "/v1/health/service/consul?dc=dc1", nil)
+	resp = httptest.NewRecorder()
+	obj, err = a.srv.HealthServiceNodes(resp, req)
+	require.NoError(t, err)
+
+	assertIndex(t, resp)
+
+	// Should be a non-nil empty list for checks
+	nodes = obj.(structs.CheckServiceNodes)
+	require.Len(t, nodes, 1)
+	require.Len(t, nodes[0].Checks, 2)
+
+	for _, check := range nodes[0].Checks {
+		if check.Name == "consul check" && check.Type != "grpc" {
+			t.Fatalf("exptected grpc check type, got %s", check.Type)
+		}
+	}
+}
+
 func TestHealthServiceNodes_WanTranslation(t *testing.T) {
 	t.Parallel()
 	a1 := NewTestAgent(t, t.Name(), `
@@ -978,7 +1035,6 @@ func TestHealthServiceNodes_WanTranslation(t *testing.T) {
 		acl_datacenter = ""
 	`)
 	defer a1.Shutdown()
-	testrpc.WaitForLeader(t, a1.RPC, "dc1")
 
 	a2 := NewTestAgent(t, t.Name(), `
 		datacenter = "dc2"
@@ -986,17 +1042,13 @@ func TestHealthServiceNodes_WanTranslation(t *testing.T) {
 		acl_datacenter = ""
 	`)
 	defer a2.Shutdown()
-	testrpc.WaitForLeader(t, a2.RPC, "dc2")
 
 	// Wait for the WAN join.
 	addr := fmt.Sprintf("127.0.0.1:%d", a1.Config.SerfPortWAN)
-	if _, err := a2.JoinWAN([]string{addr}); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	_, err := a2.srv.agent.JoinWAN([]string{addr})
+	require.NoError(t, err)
 	retry.Run(t, func(r *retry.R) {
-		if got, want := len(a1.WANMembers()), 2; got < want {
-			r.Fatalf("got %d WAN members want at least %d", got, want)
-		}
+		require.Len(r, a1.WANMembers(), 2)
 	})
 
 	// Register a node with DC2.
@@ -1010,51 +1062,55 @@ func TestHealthServiceNodes_WanTranslation(t *testing.T) {
 			},
 			Service: &structs.NodeService{
 				Service: "http_wan_translation_test",
+				Address: "127.0.0.1",
+				Port:    8080,
+				TaggedAddresses: map[string]structs.ServiceAddress{
+					"wan": structs.ServiceAddress{
+						Address: "1.2.3.4",
+						Port:    80,
+					},
+				},
 			},
 		}
 
 		var out struct{}
-		if err := a2.RPC("Catalog.Register", args, &out); err != nil {
-			t.Fatalf("err: %v", err)
-		}
+		require.NoError(t, a2.RPC("Catalog.Register", args, &out))
 	}
 
 	// Query for a service in DC2 from DC1.
 	req, _ := http.NewRequest("GET", "/v1/health/service/http_wan_translation_test?dc=dc2", nil)
 	resp1 := httptest.NewRecorder()
 	obj1, err1 := a1.srv.HealthServiceNodes(resp1, req)
-	if err1 != nil {
-		t.Fatalf("err: %v", err1)
-	}
-	assertIndex(t, resp1)
+	require.NoError(t, err1)
+	require.NoError(t, checkIndex(resp1))
 
 	// Expect that DC1 gives us a WAN address (since the node is in DC2).
-	nodes1 := obj1.(structs.CheckServiceNodes)
-	if len(nodes1) != 1 {
-		t.Fatalf("bad: %v", obj1)
-	}
-	node1 := nodes1[0].Node
-	if node1.Address != "127.0.0.2" {
-		t.Fatalf("bad: %v", node1)
-	}
+	nodes1, ok := obj1.(structs.CheckServiceNodes)
+	require.True(t, ok, "obj1 is not a structs.CheckServiceNodes")
+	require.Len(t, nodes1, 1)
+	node1 := nodes1[0]
+	require.NotNil(t, node1.Node)
+	require.Equal(t, node1.Node.Address, "127.0.0.2")
+	require.NotNil(t, node1.Service)
+	require.Equal(t, node1.Service.Address, "1.2.3.4")
+	require.Equal(t, node1.Service.Port, 80)
 
 	// Query DC2 from DC2.
 	resp2 := httptest.NewRecorder()
 	obj2, err2 := a2.srv.HealthServiceNodes(resp2, req)
-	if err2 != nil {
-		t.Fatalf("err: %v", err2)
-	}
-	assertIndex(t, resp2)
+	require.NoError(t, err2)
+	require.NoError(t, checkIndex(resp2))
 
-	// Expect that DC2 gives us a private address (since the node is in DC2).
-	nodes2 := obj2.(structs.CheckServiceNodes)
-	if len(nodes2) != 1 {
-		t.Fatalf("bad: %v", obj2)
-	}
-	node2 := nodes2[0].Node
-	if node2.Address != "127.0.0.1" {
-		t.Fatalf("bad: %v", node2)
-	}
+	// Expect that DC2 gives us a local address (since the node is in DC2).
+	nodes2, ok := obj2.(structs.CheckServiceNodes)
+	require.True(t, ok, "obj2 is not a structs.ServiceNodes")
+	require.Len(t, nodes2, 1)
+	node2 := nodes2[0]
+	require.NotNil(t, node2.Node)
+	require.Equal(t, node2.Node.Address, "127.0.0.1")
+	require.NotNil(t, node2.Service)
+	require.Equal(t, node2.Service.Address, "127.0.0.1")
+	require.Equal(t, node2.Service.Port, 8080)
 }
 
 func TestHealthConnectServiceNodes(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/consul/agent"
 	"github.com/hashicorp/consul/agent/xds"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil"
@@ -20,7 +22,7 @@ import (
 
 var update = flag.Bool("update", false, "update golden files")
 
-func TestCatalogCommand_noTabs(t *testing.T) {
+func TestEnvoyCommand_noTabs(t *testing.T) {
 	t.Parallel()
 	if strings.ContainsRune(New(nil).Help(), '\t') {
 		t.Fatal("help has tabs")
@@ -66,6 +68,7 @@ func TestGenerateConfig(t *testing.T) {
 		Env         []string
 		Files       map[string]string
 		ProxyConfig map[string]interface{}
+		GRPCPort    int // only used for testing custom-configured grpc port
 		WantArgs    BootstrapTplArgs
 		WantErr     string
 	}{
@@ -80,6 +83,7 @@ func TestGenerateConfig(t *testing.T) {
 			Flags: []string{"-proxy-id", "test-proxy"},
 			Env:   []string{},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -96,6 +100,7 @@ func TestGenerateConfig(t *testing.T) {
 				"-token", "c9a52720-bf6c-4aa6-b8bc-66881a5ade95"},
 			Env: []string{},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -114,6 +119,7 @@ func TestGenerateConfig(t *testing.T) {
 				"CONSUL_HTTP_TOKEN=c9a52720-bf6c-4aa6-b8bc-66881a5ade95",
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -135,6 +141,7 @@ func TestGenerateConfig(t *testing.T) {
 				"token.txt": "c9a52720-bf6c-4aa6-b8bc-66881a5ade95",
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -156,6 +163,7 @@ func TestGenerateConfig(t *testing.T) {
 				"token.txt": "c9a52720-bf6c-4aa6-b8bc-66881a5ade95",
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -173,6 +181,7 @@ func TestGenerateConfig(t *testing.T) {
 				"-grpc-addr", "localhost:9999"},
 			Env: []string{},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
 				ProxyCluster: "test-proxy",
 				ProxyID:      "test-proxy",
 				// Should resolve IP, note this might not resolve the same way
@@ -193,6 +202,42 @@ func TestGenerateConfig(t *testing.T) {
 				"CONSUL_GRPC_ADDR=localhost:9999",
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
+				ProxyCluster: "test-proxy",
+				ProxyID:      "test-proxy",
+				// Should resolve IP, note this might not resolve the same way
+				// everywhere which might make this test brittle but not sure what else
+				// to do.
+				AgentAddress:          "127.0.0.1",
+				AgentPort:             "9999",
+				AdminAccessLogPath:    "/dev/null",
+				AdminBindAddress:      "127.0.0.1",
+				AdminBindPort:         "19000",
+				LocalAgentClusterName: xds.LocalAgentClusterName,
+			},
+		},
+		{
+			Name: "grpc-addr-unix",
+			Flags: []string{"-proxy-id", "test-proxy",
+				"-grpc-addr", "unix:///var/run/consul.sock"},
+			Env: []string{},
+			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
+				ProxyCluster:          "test-proxy",
+				ProxyID:               "test-proxy",
+				AgentSocket:           "/var/run/consul.sock",
+				AdminAccessLogPath:    "/dev/null",
+				AdminBindAddress:      "127.0.0.1",
+				AdminBindPort:         "19000",
+				LocalAgentClusterName: xds.LocalAgentClusterName,
+			},
+		},
+		{
+			Name:     "grpc-addr-config",
+			Flags:    []string{"-proxy-id", "test-proxy"},
+			GRPCPort: 9999,
+			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
 				ProxyCluster: "test-proxy",
 				ProxyID:      "test-proxy",
 				// Should resolve IP, note this might not resolve the same way
@@ -211,6 +256,7 @@ func TestGenerateConfig(t *testing.T) {
 			Flags: []string{"-proxy-id", "test-proxy", "-admin-access-log-path", "/some/path/access.log"},
 			Env:   []string{},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
 				ProxyCluster: "test-proxy",
 				ProxyID:      "test-proxy",
 				// Should resolve IP, note this might not resolve the same way
@@ -219,6 +265,43 @@ func TestGenerateConfig(t *testing.T) {
 				AgentAddress:          "127.0.0.1",
 				AgentPort:             "8502",
 				AdminAccessLogPath:    "/some/path/access.log",
+				AdminBindAddress:      "127.0.0.1",
+				AdminBindPort:         "19000",
+				LocalAgentClusterName: xds.LocalAgentClusterName,
+			},
+		},
+		{
+			Name:  "missing-ca-file",
+			Flags: []string{"-proxy-id", "test-proxy", "-ca-file", "some/path"},
+			Env:   []string{},
+			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
+				ProxyCluster: "test-proxy",
+				ProxyID:      "test-proxy",
+				// Should resolve IP, note this might not resolve the same way
+				// everywhere which might make this test brittle but not sure what else
+				// to do.
+				AgentAddress: "127.0.0.1",
+				AgentPort:    "8502",
+			},
+			WantErr: "Error loading CA File: open some/path: no such file or directory",
+		},
+		{
+			Name:  "existing-ca-file",
+			Flags: []string{"-proxy-id", "test-proxy", "-ca-file", "../../../test/ca/root.cer"},
+			Env:   []string{"CONSUL_HTTP_SSL=1"},
+			WantArgs: BootstrapTplArgs{
+				EnvoyVersion: "1.13.0",
+				ProxyCluster: "test-proxy",
+				ProxyID:      "test-proxy",
+				// Should resolve IP, note this might not resolve the same way
+				// everywhere which might make this test brittle but not sure what else
+				// to do.
+				AgentAddress:          "127.0.0.1",
+				AgentPort:             "8502",
+				AgentTLS:              true,
+				AgentCAPEM:            `-----BEGIN CERTIFICATE-----\nMIIEtzCCA5+gAwIBAgIJAIewRMI8OnvTMA0GCSqGSIb3DQEBBQUAMIGYMQswCQYD\nVQQGEwJVUzELMAkGA1UECBMCQ0ExFjAUBgNVBAcTDVNhbiBGcmFuY2lzY28xHDAa\nBgNVBAoTE0hhc2hpQ29ycCBUZXN0IENlcnQxDDAKBgNVBAsTA0RldjEWMBQGA1UE\nAxMNdGVzdC5pbnRlcm5hbDEgMB4GCSqGSIb3DQEJARYRdGVzdEBpbnRlcm5hbC5j\nb20wHhcNMTQwNDA3MTkwMTA4WhcNMjQwNDA0MTkwMTA4WjCBmDELMAkGA1UEBhMC\nVVMxCzAJBgNVBAgTAkNBMRYwFAYDVQQHEw1TYW4gRnJhbmNpc2NvMRwwGgYDVQQK\nExNIYXNoaUNvcnAgVGVzdCBDZXJ0MQwwCgYDVQQLEwNEZXYxFjAUBgNVBAMTDXRl\nc3QuaW50ZXJuYWwxIDAeBgkqhkiG9w0BCQEWEXRlc3RAaW50ZXJuYWwuY29tMIIB\nIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxrs6JK4NpiOItxrpNR/1ppUU\nmH7p2BgLCBZ6eHdclle9J56i68adt8J85zaqphCfz6VDP58DsFx+N50PZyjQaDsU\nd0HejRqfHRMtg2O+UQkv4Z66+Vo+gc6uGuANi2xMtSYDVTAqqzF48OOPQDgYkzcG\nxcFZzTRFFZt2vPnyHj8cHcaFo/NMNVh7C3yTXevRGNm9u2mrbxCEeiHzFC2WUnvg\nU2jQuC7Fhnl33Zd3B6d3mQH6O23ncmwxTcPUJe6xZaIRrDuzwUcyhLj5Z3faag/f\npFIIcHSiHRfoqHLGsGg+3swId/zVJSSDHr7pJUu7Cre+vZa63FqDaooqvnisrQID\nAQABo4IBADCB/TAdBgNVHQ4EFgQUo/nrOfqvbee2VklVKIFlyQEbuJUwgc0GA1Ud\nIwSBxTCBwoAUo/nrOfqvbee2VklVKIFlyQEbuJWhgZ6kgZswgZgxCzAJBgNVBAYT\nAlVTMQswCQYDVQQIEwJDQTEWMBQGA1UEBxMNU2FuIEZyYW5jaXNjbzEcMBoGA1UE\nChMTSGFzaGlDb3JwIFRlc3QgQ2VydDEMMAoGA1UECxMDRGV2MRYwFAYDVQQDEw10\nZXN0LmludGVybmFsMSAwHgYJKoZIhvcNAQkBFhF0ZXN0QGludGVybmFsLmNvbYIJ\nAIewRMI8OnvTMAwGA1UdEwQFMAMBAf8wDQYJKoZIhvcNAQEFBQADggEBADa9fV9h\ngjapBlkNmu64WX0Ufub5dsJrdHS8672P30S7ILB7Mk0W8sL65IezRsZnG898yHf9\n2uzmz5OvNTM9K380g7xFlyobSVq+6yqmmSAlA/ptAcIIZT727P5jig/DB7fzJM3g\njctDlEGOmEe50GQXc25VKpcpjAsNQi5ER5gowQ0v3IXNZs+yU+LvxLHc0rUJ/XSp\nlFCAMOqd5uRoMOejnT51G6krvLNzPaQ3N9jQfNVY4Q0zfs0M+6dRWvqfqB9Vyq8/\nPOLMld+HyAZEBk9zK3ZVIXx6XS4dkDnSNR91njLq7eouf6M7+7s/oMQZZRtAfQ6r\nwlW975rYa1ZqEdA=\n-----END CERTIFICATE-----\n`,
+				AdminAccessLogPath:    "/dev/null",
 				AdminBindAddress:      "127.0.0.1",
 				AdminBindPort:         "19000",
 				LocalAgentClusterName: xds.LocalAgentClusterName,
@@ -247,10 +330,11 @@ func TestGenerateConfig(t *testing.T) {
 						"cluster": "{{ .ProxyCluster }}",
 						"id": "{{ .ProxyID }}"
 					},
-					custom_field = "foo"
+					"custom_field": "foo"
 				}`,
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -283,6 +367,7 @@ func TestGenerateConfig(t *testing.T) {
 				}`,
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -320,6 +405,7 @@ func TestGenerateConfig(t *testing.T) {
 				} , { "name": "fake_sink_2" }`,
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -344,6 +430,7 @@ func TestGenerateConfig(t *testing.T) {
 				}`,
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -398,6 +485,7 @@ func TestGenerateConfig(t *testing.T) {
 				}`,
 			},
 			WantArgs: BootstrapTplArgs{
+				EnvoyVersion:          "1.13.0",
 				ProxyCluster:          "test-proxy",
 				ProxyID:               "test-proxy",
 				AgentAddress:          "127.0.0.1",
@@ -437,7 +525,7 @@ func TestGenerateConfig(t *testing.T) {
 
 			// Run a mock agent API that just always returns the proxy config in the
 			// test.
-			srv := httptest.NewServer(testMockAgentProxyConfig(tc.ProxyConfig))
+			srv := httptest.NewServer(testMockAgent(tc.ProxyConfig, tc.GRPCPort))
 			defer srv.Close()
 
 			// Set the agent HTTP address in ENV to be our mock
@@ -485,6 +573,25 @@ func TestGenerateConfig(t *testing.T) {
 	}
 }
 
+// testMockAgent combines testMockAgentProxyConfig and testMockAgentSelf,
+// routing /agent/service/... requests to testMockAgentProxyConfig and
+// routing /agent/self requests to testMockAgentSelf.
+func testMockAgent(agentCfg map[string]interface{}, grpcPort int) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/agent/service") {
+			testMockAgentProxyConfig(agentCfg)(w, r)
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/agent/self") {
+			testMockAgentSelf(grpcPort)(w, r)
+			return
+		}
+
+		http.NotFound(w, r)
+	})
+}
+
 func testMockAgentProxyConfig(cfg map[string]interface{}) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Parse the proxy-id from the end of the URL (blindly assuming it's correct
@@ -510,5 +617,121 @@ func testMockAgentProxyConfig(cfg map[string]interface{}) http.HandlerFunc {
 			return
 		}
 		w.Write(cfgJSON)
+	})
+}
+
+func TestEnvoyCommand_canBindInternal(t *testing.T) {
+	t.Parallel()
+	type testCheck struct {
+		expected bool
+		addr     string
+	}
+
+	type testCase struct {
+		ifAddrs []net.Addr
+		checks  map[string]testCheck
+	}
+
+	parseIPNets := func(t *testing.T, in ...string) []net.Addr {
+		var out []net.Addr
+		for _, addr := range in {
+			ip := net.ParseIP(addr)
+			require.NotNil(t, ip)
+			out = append(out, &net.IPNet{IP: ip})
+		}
+		return out
+	}
+
+	parseIPs := func(t *testing.T, in ...string) []net.Addr {
+		var out []net.Addr
+		for _, addr := range in {
+			ip := net.ParseIP(addr)
+			require.NotNil(t, ip)
+			out = append(out, &net.IPAddr{IP: ip})
+		}
+		return out
+	}
+
+	cases := map[string]testCase{
+		"IPNet": {
+			parseIPNets(t, "10.3.0.2", "198.18.0.1", "2001:db8:a0b:12f0::1"),
+			map[string]testCheck{
+				"ipv4": {
+					true,
+					"10.3.0.2",
+				},
+				"secondary ipv4": {
+					true,
+					"198.18.0.1",
+				},
+				"ipv6": {
+					true,
+					"2001:db8:a0b:12f0::1",
+				},
+				"ipv4 not found": {
+					false,
+					"1.2.3.4",
+				},
+				"ipv6 not found": {
+					false,
+					"::ffff:192.168.0.1",
+				},
+			},
+		},
+		"IPAddr": {
+			parseIPs(t, "10.3.0.2", "198.18.0.1", "2001:db8:a0b:12f0::1"),
+			map[string]testCheck{
+				"ipv4": {
+					true,
+					"10.3.0.2",
+				},
+				"secondary ipv4": {
+					true,
+					"198.18.0.1",
+				},
+				"ipv6": {
+					true,
+					"2001:db8:a0b:12f0::1",
+				},
+				"ipv4 not found": {
+					false,
+					"1.2.3.4",
+				},
+				"ipv6 not found": {
+					false,
+					"::ffff:192.168.0.1",
+				},
+			},
+		},
+	}
+
+	for name, tcase := range cases {
+		t.Run(name, func(t *testing.T) {
+			for checkName, check := range tcase.checks {
+				t.Run(checkName, func(t *testing.T) {
+					require.Equal(t, check.expected, canBindInternal(check.addr, tcase.ifAddrs))
+				})
+			}
+		})
+	}
+}
+
+// testMockAgentSelf returns an empty /v1/agent/self response except GRPC
+// port is filled in to match the given wantGRPCPort argument.
+func testMockAgentSelf(wantGRPCPort int) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := agent.Self{
+			DebugConfig: map[string]interface{}{
+				"GRPCPort": wantGRPCPort,
+			},
+		}
+
+		selfJSON, err := json.Marshal(resp)
+		if err != nil {
+			w.WriteHeader(500)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		w.Write(selfJSON)
 	})
 }

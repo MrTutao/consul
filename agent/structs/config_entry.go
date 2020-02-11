@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/go-msgpack/codec"
+	"github.com/hashicorp/go-multierror"
 	"github.com/mitchellh/hashstructure"
 	"github.com/mitchellh/mapstructure"
 )
@@ -16,6 +17,9 @@ import (
 const (
 	ServiceDefaults string = "service-defaults"
 	ProxyDefaults   string = "proxy-defaults"
+	ServiceRouter   string = "service-router"
+	ServiceSplitter string = "service-splitter"
+	ServiceResolver string = "service-resolver"
 
 	ProxyConfigGlobal string = "global"
 
@@ -37,21 +41,28 @@ type ConfigEntry interface {
 	CanRead(acl.Authorizer) bool
 	CanWrite(acl.Authorizer) bool
 
+	GetEnterpriseMeta() *EnterpriseMeta
 	GetRaftIndex() *RaftIndex
 }
 
 // ServiceConfiguration is the top-level struct for the configuration of a service
 // across the entire cluster.
 type ServiceConfigEntry struct {
-	Kind     string
-	Name     string
-	Protocol string
+	Kind        string
+	Name        string
+	Protocol    string
+	MeshGateway MeshGatewayConfig `json:",omitempty"`
+	Expose      ExposeConfig      `json:",omitempty"`
+
+	ExternalSNI string `json:",omitempty"`
+
 	// TODO(banks): enable this once we have upstreams supported too. Enabling
 	// sidecars actually makes no sense and adds complications when you don't
 	// allow upstreams to be specified centrally too.
 	//
 	// Connect ConnectConfiguration
 
+	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	RaftIndex
 }
 
@@ -73,11 +84,9 @@ func (e *ServiceConfigEntry) Normalize() error {
 	}
 
 	e.Kind = ServiceDefaults
-	if e.Protocol == "" {
-		e.Protocol = DefaultServiceProtocol
-	} else {
-		e.Protocol = strings.ToLower(e.Protocol)
-	}
+	e.Protocol = strings.ToLower(e.Protocol)
+
+	e.EnterpriseMeta.Normalize()
 
 	return nil
 }
@@ -86,12 +95,16 @@ func (e *ServiceConfigEntry) Validate() error {
 	return nil
 }
 
-func (e *ServiceConfigEntry) CanRead(rule acl.Authorizer) bool {
-	return rule.ServiceRead(e.Name)
+func (e *ServiceConfigEntry) CanRead(authz acl.Authorizer) bool {
+	var authzContext acl.AuthorizerContext
+	e.FillAuthzContext(&authzContext)
+	return authz.ServiceRead(e.Name, &authzContext) == acl.Allow
 }
 
-func (e *ServiceConfigEntry) CanWrite(rule acl.Authorizer) bool {
-	return rule.ServiceWrite(e.Name, nil)
+func (e *ServiceConfigEntry) CanWrite(authz acl.Authorizer) bool {
+	var authzContext acl.AuthorizerContext
+	e.FillAuthzContext(&authzContext)
+	return authz.ServiceWrite(e.Name, &authzContext) == acl.Allow
 }
 
 func (e *ServiceConfigEntry) GetRaftIndex() *RaftIndex {
@@ -102,16 +115,27 @@ func (e *ServiceConfigEntry) GetRaftIndex() *RaftIndex {
 	return &e.RaftIndex
 }
 
+func (e *ServiceConfigEntry) GetEnterpriseMeta() *EnterpriseMeta {
+	if e == nil {
+		return nil
+	}
+
+	return &e.EnterpriseMeta
+}
+
 type ConnectConfiguration struct {
 	SidecarProxy bool
 }
 
 // ProxyConfigEntry is the top-level struct for global proxy configuration defaults.
 type ProxyConfigEntry struct {
-	Kind   string
-	Name   string
-	Config map[string]interface{}
+	Kind        string
+	Name        string
+	Config      map[string]interface{}
+	MeshGateway MeshGatewayConfig `json:",omitempty"`
+	Expose      ExposeConfig      `json:",omitempty"`
 
+	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	RaftIndex
 }
 
@@ -135,6 +159,8 @@ func (e *ProxyConfigEntry) Normalize() error {
 	e.Kind = ProxyDefaults
 	e.Name = ProxyConfigGlobal
 
+	e.EnterpriseMeta.Normalize()
+
 	return nil
 }
 
@@ -147,15 +173,17 @@ func (e *ProxyConfigEntry) Validate() error {
 		return fmt.Errorf("invalid name (%q), only %q is supported", e.Name, ProxyConfigGlobal)
 	}
 
-	return nil
+	return e.validateEnterpriseMeta()
 }
 
-func (e *ProxyConfigEntry) CanRead(rule acl.Authorizer) bool {
+func (e *ProxyConfigEntry) CanRead(authz acl.Authorizer) bool {
 	return true
 }
 
-func (e *ProxyConfigEntry) CanWrite(rule acl.Authorizer) bool {
-	return rule.OperatorWrite()
+func (e *ProxyConfigEntry) CanWrite(authz acl.Authorizer) bool {
+	var authzContext acl.AuthorizerContext
+	e.FillAuthzContext(&authzContext)
+	return authz.OperatorWrite(&authzContext) == acl.Allow
 }
 
 func (e *ProxyConfigEntry) GetRaftIndex() *RaftIndex {
@@ -164,6 +192,14 @@ func (e *ProxyConfigEntry) GetRaftIndex() *RaftIndex {
 	}
 
 	return &e.RaftIndex
+}
+
+func (e *ProxyConfigEntry) GetEnterpriseMeta() *EnterpriseMeta {
+	if e == nil {
+		return nil
+	}
+
+	return &e.EnterpriseMeta
 }
 
 func (e *ProxyConfigEntry) MarshalBinary() (data []byte, err error) {
@@ -180,7 +216,7 @@ func (e *ProxyConfigEntry) MarshalBinary() (data []byte, err error) {
 	// bs will grow if needed but allocate enough to avoid reallocation in common
 	// case.
 	bs := make([]byte, 128)
-	enc := codec.NewEncoderBytes(&bs, msgpackHandle)
+	enc := codec.NewEncoderBytes(&bs, MsgpackHandle)
 	err = enc.Encode(a)
 	if err != nil {
 		return nil, err
@@ -199,7 +235,7 @@ func (e *ProxyConfigEntry) UnmarshalBinary(data []byte) error {
 	type alias ProxyConfigEntry
 
 	var a alias
-	dec := codec.NewDecoderBytes(data, msgpackHandle)
+	dec := codec.NewDecoderBytes(data, MsgpackHandle)
 	if err := dec.Decode(&a); err != nil {
 		return err
 	}
@@ -221,21 +257,18 @@ func (e *ProxyConfigEntry) UnmarshalBinary(data []byte) error {
 // the kind so we will not have a concrete type to decode into. In those cases we must
 // first decode into a map[string]interface{} and then call this function to decode
 // into a concrete type.
+//
+// There is an 'api' variation of this in
+// command/config/write/config_write.go:newDecodeConfigEntry
 func DecodeConfigEntry(raw map[string]interface{}) (ConfigEntry, error) {
-	lib.TranslateKeys(raw, map[string]string{
-		"kind":          "Kind",
-		"name":          "Name",
-		"connect":       "Connect",
-		"sidecar_proxy": "SidecarProxy",
-		"protocol":      "Protocol",
-		"Config":        "",
-	})
-
 	var entry ConfigEntry
 
 	kindVal, ok := raw["Kind"]
 	if !ok {
-		return nil, fmt.Errorf("Payload does not contain a Kind key at the top level")
+		kindVal, ok = raw["kind"]
+	}
+	if !ok {
+		return nil, fmt.Errorf("Payload does not contain a kind/Kind key at the top level")
 	}
 
 	if kindStr, ok := kindVal.(string); ok {
@@ -248,9 +281,23 @@ func DecodeConfigEntry(raw map[string]interface{}) (ConfigEntry, error) {
 		return nil, fmt.Errorf("Kind value in payload is not a string")
 	}
 
+	skipWhenPatching, translateKeysDict, err := ConfigEntryDecodeRulesForKind(entry.GetKind())
+	if err != nil {
+		return nil, err
+	}
+
+	// lib.TranslateKeys doesn't understand []map[string]interface{} so we have
+	// to do this part first.
+	raw = lib.PatchSliceOfMaps(raw, skipWhenPatching, nil)
+
+	lib.TranslateKeys(raw, translateKeysDict)
+
+	var md mapstructure.Metadata
 	decodeConf := &mapstructure.DecoderConfig{
-		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
-		Result:     &entry,
+		DecodeHook:       mapstructure.StringToTimeDurationHookFunc(),
+		Metadata:         &md,
+		Result:           &entry,
+		WeaklyTypedInput: true,
 	}
 
 	decoder, err := mapstructure.NewDecoder(decodeConf)
@@ -258,7 +305,80 @@ func DecodeConfigEntry(raw map[string]interface{}) (ConfigEntry, error) {
 		return nil, err
 	}
 
-	return entry, decoder.Decode(raw)
+	if err := decoder.Decode(raw); err != nil {
+		return nil, err
+	}
+
+	for _, k := range md.Unused {
+		switch k {
+		case "CreateIndex", "ModifyIndex":
+		default:
+			err = multierror.Append(err, fmt.Errorf("invalid config key %q", k))
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return entry, nil
+}
+
+// ConfigEntryDecodeRulesForKind returns rules for 'fixing' config entry key
+// formats by kind. This is shared between the 'structs' and 'api' variations
+// of config entries.
+func ConfigEntryDecodeRulesForKind(kind string) (skipWhenPatching []string, translateKeysDict map[string]string, err error) {
+	switch kind {
+	case ProxyDefaults:
+		return []string{
+				"expose.paths",
+				"Expose.Paths",
+			}, map[string]string{
+				"local_path_port": "localpathport",
+				"listener_port":   "listenerport",
+				"mesh_gateway":    "meshgateway",
+				"config":          "",
+			}, nil
+	case ServiceDefaults:
+		return nil, map[string]string{
+			"mesh_gateway": "meshgateway",
+			"external_sni": "externalsni",
+		}, nil
+	case ServiceRouter:
+		return []string{
+				"routes",
+				"Routes",
+				"routes.match.http.header",
+				"Routes.Match.HTTP.Header",
+				"routes.match.http.query_param",
+				"Routes.Match.HTTP.QueryParam",
+			}, map[string]string{
+				"num_retries":              "numretries",
+				"path_exact":               "pathexact",
+				"path_prefix":              "pathprefix",
+				"path_regex":               "pathregex",
+				"prefix_rewrite":           "prefixrewrite",
+				"query_param":              "queryparam",
+				"request_timeout":          "requesttimeout",
+				"retry_on_connect_failure": "retryonconnectfailure",
+				"retry_on_status_codes":    "retryonstatuscodes",
+				"service_subset":           "servicesubset",
+			}, nil
+	case ServiceSplitter:
+		return []string{
+				"splits",
+				"Splits",
+			}, map[string]string{
+				"service_subset": "servicesubset",
+			}, nil
+	case ServiceResolver:
+		return nil, map[string]string{
+			"connect_timeout": "connecttimeout",
+			"default_subset":  "defaultsubset",
+			"only_passing":    "onlypassing",
+			"service_subset":  "servicesubset",
+		}, nil
+	default:
+		return nil, nil, fmt.Errorf("kind %q should be explicitly handled here", kind)
+	}
 }
 
 type ConfigEntryOp string
@@ -286,7 +406,7 @@ func (c *ConfigEntryRequest) MarshalBinary() (data []byte, err error) {
 	// bs will grow if needed but allocate enough to avoid reallocation in common
 	// case.
 	bs := make([]byte, 128)
-	enc := codec.NewEncoderBytes(&bs, msgpackHandle)
+	enc := codec.NewEncoderBytes(&bs, MsgpackHandle)
 	// Encode kind first
 	err = enc.Encode(c.Entry.GetKind())
 	if err != nil {
@@ -308,7 +428,7 @@ func (c *ConfigEntryRequest) MarshalBinary() (data []byte, err error) {
 func (c *ConfigEntryRequest) UnmarshalBinary(data []byte) error {
 	// First decode the kind prefix
 	var kind string
-	dec := codec.NewDecoderBytes(data, msgpackHandle)
+	dec := codec.NewDecoderBytes(data, MsgpackHandle)
 	if err := dec.Decode(&kind); err != nil {
 		return err
 	}
@@ -340,6 +460,12 @@ func MakeConfigEntry(kind, name string) (ConfigEntry, error) {
 		return &ServiceConfigEntry{Name: name}, nil
 	case ProxyDefaults:
 		return &ProxyConfigEntry{Name: name}, nil
+	case ServiceRouter:
+		return &ServiceRouterConfigEntry{Name: name}, nil
+	case ServiceSplitter:
+		return &ServiceSplitterConfigEntry{Name: name}, nil
+	case ServiceResolver:
+		return &ServiceResolverConfigEntry{Name: name}, nil
 	default:
 		return nil, fmt.Errorf("invalid config entry kind: %s", kind)
 	}
@@ -348,6 +474,8 @@ func MakeConfigEntry(kind, name string) (ConfigEntry, error) {
 func ValidateConfigEntryKind(kind string) bool {
 	switch kind {
 	case ServiceDefaults, ProxyDefaults:
+		return true
+	case ServiceRouter, ServiceSplitter, ServiceResolver:
 		return true
 	default:
 		return false
@@ -360,6 +488,7 @@ type ConfigEntryQuery struct {
 	Name       string
 	Datacenter string
 
+	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	QueryOptions
 }
 
@@ -367,13 +496,45 @@ func (c *ConfigEntryQuery) RequestDatacenter() string {
 	return c.Datacenter
 }
 
+func (r *ConfigEntryQuery) CacheInfo() cache.RequestInfo {
+	info := cache.RequestInfo{
+		Token:          r.Token,
+		Datacenter:     r.Datacenter,
+		MinIndex:       r.MinQueryIndex,
+		Timeout:        r.MaxQueryTime,
+		MaxAge:         r.MaxAge,
+		MustRevalidate: r.MustRevalidate,
+	}
+
+	v, err := hashstructure.Hash([]interface{}{
+		r.Kind,
+		r.Name,
+		r.Filter,
+		r.EnterpriseMeta,
+	}, nil)
+	if err == nil {
+		// If there is an error, we don't set the key. A blank key forces
+		// no cache for this request so the request is forwarded directly
+		// to the server.
+		info.Key = strconv.FormatUint(v, 10)
+	}
+
+	return info
+}
+
 // ServiceConfigRequest is used when requesting the resolved configuration
 // for a service.
 type ServiceConfigRequest struct {
 	Name       string
 	Datacenter string
-	Upstreams  []string
+	// DEPRECATED
+	// Upstreams is a list of upstream service names to use for resolving the service config
+	// UpstreamIDs should be used instead which can encode more than just the name to
+	// uniquely identify a service.
+	Upstreams   []string
+	UpstreamIDs []ServiceID
 
+	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	QueryOptions
 }
 
@@ -397,11 +558,13 @@ func (r *ServiceConfigRequest) CacheInfo() cache.RequestInfo {
 	// the slice would affect cache keys if we ever persist between agent restarts
 	// and change it.
 	v, err := hashstructure.Hash(struct {
-		Name      string
-		Upstreams []string `hash:"set"`
+		Name           string
+		EnterpriseMeta EnterpriseMeta
+		Upstreams      []string `hash:"set"`
 	}{
-		Name:      r.Name,
-		Upstreams: r.Upstreams,
+		Name:           r.Name,
+		EnterpriseMeta: r.EnterpriseMeta,
+		Upstreams:      r.Upstreams,
 	}, nil)
 	if err == nil {
 		// If there is an error, we don't set the key. A blank key forces
@@ -413,10 +576,36 @@ func (r *ServiceConfigRequest) CacheInfo() cache.RequestInfo {
 	return info
 }
 
+type UpstreamConfig struct {
+	Upstream ServiceID
+	Config   map[string]interface{}
+}
+
+type UpstreamConfigs []UpstreamConfig
+
+func (configs UpstreamConfigs) GetUpstreamConfig(sid ServiceID) (config map[string]interface{}, found bool) {
+	for _, usconf := range configs {
+		if usconf.Upstream.Matches(&sid) {
+			return usconf.Config, true
+		}
+	}
+
+	return nil, false
+}
+
 type ServiceConfigResponse struct {
-	ProxyConfig     map[string]interface{}
-	UpstreamConfigs map[string]map[string]interface{}
+	ProxyConfig       map[string]interface{}
+	UpstreamConfigs   map[string]map[string]interface{}
+	UpstreamIDConfigs UpstreamConfigs
+	MeshGateway       MeshGatewayConfig `json:",omitempty"`
+	Expose            ExposeConfig      `json:",omitempty"`
 	QueryMeta
+}
+
+func (r *ServiceConfigResponse) Reset() {
+	r.ProxyConfig = nil
+	r.UpstreamConfigs = nil
+	r.MeshGateway = MeshGatewayConfig{}
 }
 
 // MarshalBinary writes ServiceConfigResponse as msgpack encoded. It's only here
@@ -425,7 +614,7 @@ func (r *ServiceConfigResponse) MarshalBinary() (data []byte, err error) {
 	// bs will grow if needed but allocate enough to avoid reallocation in common
 	// case.
 	bs := make([]byte, 128)
-	enc := codec.NewEncoderBytes(&bs, msgpackHandle)
+	enc := codec.NewEncoderBytes(&bs, MsgpackHandle)
 
 	type Alias ServiceConfigResponse
 
@@ -440,7 +629,7 @@ func (r *ServiceConfigResponse) MarshalBinary() (data []byte, err error) {
 // default msgpack encoding but fixes up the uint8 strings and other problems we
 // have with encoding map[string]interface{}.
 func (r *ServiceConfigResponse) UnmarshalBinary(data []byte) error {
-	dec := codec.NewDecoderBytes(data, msgpackHandle)
+	dec := codec.NewDecoderBytes(data, MsgpackHandle)
 
 	type Alias ServiceConfigResponse
 	var a Alias
@@ -464,6 +653,13 @@ func (r *ServiceConfigResponse) UnmarshalBinary(data []byte) error {
 			return err
 		}
 	}
+
+	for k := range r.UpstreamIDConfigs {
+		r.UpstreamIDConfigs[k].Config, err = lib.MapWalk(r.UpstreamIDConfigs[k].Config)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -477,7 +673,7 @@ func (c *ConfigEntryResponse) MarshalBinary() (data []byte, err error) {
 	// bs will grow if needed but allocate enough to avoid reallocation in common
 	// case.
 	bs := make([]byte, 128)
-	enc := codec.NewEncoderBytes(&bs, msgpackHandle)
+	enc := codec.NewEncoderBytes(&bs, MsgpackHandle)
 
 	if c.Entry != nil {
 		if err := enc.Encode(c.Entry.GetKind()); err != nil {
@@ -500,7 +696,7 @@ func (c *ConfigEntryResponse) MarshalBinary() (data []byte, err error) {
 }
 
 func (c *ConfigEntryResponse) UnmarshalBinary(data []byte) error {
-	dec := codec.NewDecoderBytes(data, msgpackHandle)
+	dec := codec.NewDecoderBytes(data, MsgpackHandle)
 
 	var kind string
 	if err := dec.Decode(&kind); err != nil {
@@ -526,4 +722,13 @@ func (c *ConfigEntryResponse) UnmarshalBinary(data []byte) error {
 	}
 
 	return nil
+}
+
+// ConfigEntryKindName is a value type useful for maps. You can use:
+//     map[ConfigEntryKindName]Payload
+// instead of:
+//     map[string]map[string]Payload
+type ConfigEntryKindName struct {
+	Kind string
+	Name string
 }

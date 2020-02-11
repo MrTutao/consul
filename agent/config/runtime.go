@@ -196,6 +196,12 @@ type RuntimeConfig struct {
 	// hcl: autopilot { max_trailing_logs = int }
 	AutopilotMaxTrailingLogs int
 
+	// AutopilotMinQuorum sets the minimum number of servers required in a cluster
+	// before autopilot can prune dead servers.
+	//
+	//hcl: autopilot { min_quorum = int }
+	AutopilotMinQuorum uint
+
 	// AutopilotRedundancyZoneTag is the Meta tag to use for separating servers
 	// into zones for redundancy. If left blank, this feature will be disabled.
 	// (Enterprise-only)
@@ -333,12 +339,12 @@ type RuntimeConfig struct {
 	// flag: -recursor string [-recursor string]
 	DNSRecursors []string
 
-	// DNSUseCache wether or not to use cache for dns queries
+	// DNSUseCache whether or not to use cache for dns queries
 	//
 	// hcl: dns_config { use_cache = (true|false) }
 	DNSUseCache bool
 
-	// DNSUseCache wether or not to use cache for dns queries
+	// DNSUseCache whether or not to use cache for dns queries
 	//
 	// hcl: dns_config { cache_max_age = "duration" }
 	DNSCacheMaxAge time.Duration
@@ -523,6 +529,14 @@ type RuntimeConfig struct {
 	// servers.
 	AutoEncryptTLS bool
 
+	// Additional DNS SAN entries that clients request during auto_encrypt
+	// flow for their certificates.
+	AutoEncryptDNSSAN []string
+
+	// Additional IP SAN entries that clients request during auto_encrypt
+	// flow for their certificates.
+	AutoEncryptIPSAN []net.IP
+
 	// AutoEncryptAllowTLS enables the server to respond to
 	// AutoEncrypt.Sign requests.
 	AutoEncryptAllowTLS bool
@@ -530,16 +544,6 @@ type RuntimeConfig struct {
 	// ConnectEnabled opts the agent into connect. It should be set on all clients
 	// and servers in a cluster for correct connect operation.
 	ConnectEnabled bool
-
-	// ConnectProxyBindMinPort is the inclusive start of the range of ports
-	// allocated to the agent for starting proxy listeners on where no explicit
-	// port is specified.
-	ConnectProxyBindMinPort int
-
-	// ConnectProxyBindMaxPort is the inclusive end of the range of ports
-	// allocated to the agent for starting proxy listeners on where no explicit
-	// port is specified.
-	ConnectProxyBindMaxPort int
 
 	// ConnectSidecarMinPort is the inclusive start of the range of ports
 	// allocated to the agent for asigning to sidecar services where no port is
@@ -551,46 +555,19 @@ type RuntimeConfig struct {
 	// specified
 	ConnectSidecarMaxPort int
 
-	// ConnectProxyAllowManagedRoot is true if Consul can execute managed
-	// proxies when running as root (EUID == 0).
-	ConnectProxyAllowManagedRoot bool
+	// ExposeMinPort is the inclusive start of the range of ports
+	// allocated to the agent for exposing checks through a proxy
+	ExposeMinPort int
 
-	// ConnectProxyAllowManagedAPIRegistration enables managed proxy registration
-	// via the agent HTTP API. If this is false, only file configurations
-	// can be used.
-	ConnectProxyAllowManagedAPIRegistration bool
-
-	// ConnectProxyDefaultExecMode is used where a registration doesn't include an
-	// exec_mode. Defaults to daemon.
-	ConnectProxyDefaultExecMode string
-
-	// ConnectProxyDefaultDaemonCommand is used to start proxy in exec_mode =
-	// daemon if not specified at registration time.
-	ConnectProxyDefaultDaemonCommand []string
-
-	// ConnectProxyDefaultScriptCommand is used to start proxy in exec_mode =
-	// script if not specified at registration time.
-	ConnectProxyDefaultScriptCommand []string
-
-	// ConnectProxyDefaultConfig is merged with any config specified at
-	// registration time to allow global control of defaults.
-	ConnectProxyDefaultConfig map[string]interface{}
+	// ExposeMinPort is the inclusive start of the range of ports
+	// allocated to the agent for exposing checks through a proxy
+	ExposeMaxPort int
 
 	// ConnectCAProvider is the type of CA provider to use with Connect.
 	ConnectCAProvider string
 
 	// ConnectCAConfig is the config to use for the CA provider.
 	ConnectCAConfig map[string]interface{}
-
-	// ConnectTestDisableManagedProxies is not exposed to public config but is
-	// used by TestAgent to prevent self-executing the test binary in the
-	// background if a managed proxy is created for a test. The only place we
-	// actually want to test processes really being spun up and managed is in
-	// `agent/proxy` and it does it at a lower level. Note that this still allows
-	// registering managed proxies via API and other methods, and still creates
-	// all the agent state for them, just doesn't actually start external
-	// processes up.
-	ConnectTestDisableManagedProxies bool
 
 	// ConnectTestCALeafRootChangeSpread is used to control how long the CA leaf
 	// cache with spread CSRs over when a root change occurs. For now we don't
@@ -630,6 +607,14 @@ type RuntimeConfig struct {
 	// hcl: data_dir = string
 	// flag: -data-dir string
 	DataDir string
+
+	// DefaultQueryTime is the amount of time a blocking query will wait before
+	// Consul will force a response. This value can be overridden by the 'wait'
+	// query parameter.
+	//
+	// hcl: default_query_time = "duration"
+	// flag: -default-query-time string
+	DefaultQueryTime time.Duration
 
 	// DevMode enables a fast-path mode of operation to bring up an in-memory
 	// server with minimal configuration. Useful for developing Consul.
@@ -818,10 +803,23 @@ type RuntimeConfig struct {
 	// hcl: client_addr = string addresses { https = string } ports { https = int }
 	HTTPSAddrs []net.Addr
 
+	// HTTPMaxConnsPerClient limits the number of concurrent TCP connections the
+	// HTTP(S) server will accept from any single source IP address.
+	//
+	// hcl: limits{ http_max_conns_per_client = 100 }
+	HTTPMaxConnsPerClient int
+
+	// HTTPSHandshakeTimeout is the time allowed for HTTPS client to complete the
+	// TLS handshake and send first bytes of the request.
+	//
+	// hcl: limits{ https_handshake_timeout = "5s" }
+	HTTPSHandshakeTimeout time.Duration
+
 	// HTTPSPort is the port the HTTP server listens on. The default is -1.
 	// Setting this to a value <= 0 disables the endpoint.
 	//
 	// hcl: ports { https = int }
+	// flags: -https-port int
 	HTTPSPort int
 
 	// KeyFile is used to provide a TLS key that is used for serving TLS
@@ -829,6 +827,12 @@ type RuntimeConfig struct {
 	//
 	// hcl: key_file = string
 	KeyFile string
+
+	// KVMaxValueSize controls the max allowed value size. If not set defaults
+	// to raft's suggested max value size.
+	//
+	// hcl: limits { kv_max_value_size = uint64 }
+	KVMaxValueSize uint64
 
 	// LeaveDrainTime is used to wait after a server has left the LAN Serf
 	// pool for RPCs to drain and new requests to be sent to other servers.
@@ -847,6 +851,12 @@ type RuntimeConfig struct {
 	// hcl: log_level = string
 	LogLevel string
 
+	// LogJSON controls whether to output logs as structured JSON. Defaults to false.
+	//
+	// hcl: log_json = (true|false)
+	// flag: -log-json
+	LogJSON bool
+
 	// LogFile is the path to the file where the logs get written to. Defaults to empty string.
 	//
 	// hcl: log_file = string
@@ -864,6 +874,20 @@ type RuntimeConfig struct {
 	// hcl: log_rotate_bytes = int
 	// flags: -log-rotate-bytes int
 	LogRotateBytes int
+
+	// LogRotateMaxFiles is the maximum number of log file archives to keep
+	//
+	// hcl: log_rotate_max_files = int
+	// flags: -log-rotate-max-files int
+	LogRotateMaxFiles int
+
+	// MaxQueryTime is the maximum amount of time a blocking query can wait
+	// before Consul will force a response. Consul applies jitter to the wait
+	// time. The jittered time will be capped to MaxQueryTime.
+	//
+	// hcl: max_query_time = "duration"
+	// flags: -max-query-time string
+	MaxQueryTime time.Duration
 
 	// Node ID is a unique ID for this node across space and time. Defaults
 	// to a randomly-generated ID that persists in the data-dir.
@@ -915,6 +939,15 @@ type RuntimeConfig struct {
 	// hcl: bind_addr = string ports { server = int }
 	RPCBindAddr *net.TCPAddr
 
+	// RPCHandshakeTimeout is the timeout for reading the initial magic byte on a
+	// new RPC connection. If this is set high it may allow unauthenticated users
+	// to hold connections open arbitrarily long, even when mutual TLS is being
+	// enforced. It may be set to 0 explicitly to disable the timeout but this
+	// should never be used in production. Default is 5 seconds.
+	//
+	// hcl: limits { rpc_handshake_timeout = "duration" }
+	RPCHandshakeTimeout time.Duration
+
 	// RPCHoldTimeout is how long an RPC can be "held" before it is errored.
 	// This is used to paper over a loss of leadership by instead holding RPCs,
 	// so that the caller experiences a slow response rather than an error.
@@ -937,6 +970,12 @@ type RuntimeConfig struct {
 	RPCRateLimit rate.Limit
 	RPCMaxBurst  int
 
+	// RPCMaxConnsPerClient limits the number of concurrent TCP connections the
+	// RPC server will accept from any single source IP address.
+	//
+	// hcl: limits{ rpc_max_conns_per_client = 100 }
+	RPCMaxConnsPerClient int
+
 	// RPCProtocol is the Consul protocol version to use.
 	//
 	// hcl: protocol = int
@@ -958,6 +997,22 @@ type RuntimeConfig struct {
 	// a new snapshot. Defaults to 5 seconds.
 	// hcl: raft_snapshot_threshold = int
 	RaftSnapshotInterval time.Duration
+
+	// RaftTrailingLogs sets the number of log entries that will be left in the
+	// log store after a snapshot. This must be large enough that a follower can
+	// transfer and restore an entire snapshot of the state before this many new
+	// entries have been appended. In vast majority of cases the default is plenty
+	// but if there is a sustained high write throughput coupled with a huge
+	// multi-gigabyte snapshot setting this higher may be necessary to allow
+	// followers time to reload from snapshot without becoming unhealthy. If it's
+	// too low then followers are unable to ever recover from a restart and will
+	// enter a loop of constantly downloading full snapshots and never catching
+	// up. If you need to change this you should reconsider your usage of Consul
+	// as it is not designed to store multiple-gigabyte data sets with high write
+	// throughput. Defaults to 10000.
+	//
+	// hcl: raft_trailing_logs = int
+	RaftTrailingLogs int
 
 	// ReconnectTimeoutLAN specifies the amount of time to wait to reconnect with
 	// another agent before deciding it's permanently gone. This can be used to
@@ -1481,6 +1536,8 @@ type RuntimeConfig struct {
 	// ]
 	//
 	Watches []map[string]interface{}
+
+	EnterpriseRuntimeConfig
 }
 
 func (c *RuntimeConfig) apiAddresses(maxPerType int) (unixAddrs, httpAddrs, httpsAddrs []string) {
@@ -1668,7 +1725,6 @@ func cleanRetryJoin(a string) string {
 func sanitize(name string, v reflect.Value) reflect.Value {
 	typ := v.Type()
 	switch {
-
 	// check before isStruct and isPtr
 	case isNetAddr(typ):
 		if v.IsNil() {
@@ -1683,6 +1739,8 @@ func sanitize(name string, v reflect.Value) reflect.Value {
 			return reflect.ValueOf("unix://" + x.String())
 		case *net.IPAddr:
 			return reflect.ValueOf(x.IP.String())
+		case *net.IPNet:
+			return reflect.ValueOf(x.String())
 		default:
 			return v
 		}

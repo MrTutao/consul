@@ -22,6 +22,7 @@ import (
 	tokenStore "github.com/hashicorp/consul/agent/token"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil"
+	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
 	cleanhttp "github.com/hashicorp/go-cleanhttp"
 	"github.com/stretchr/testify/assert"
@@ -131,16 +132,14 @@ func TestHTTPServer_H2(t *testing.T) {
 	t.Parallel()
 
 	// Fire up an agent with TLS enabled.
-	a := &TestAgent{
-		Name:   t.Name(),
+	a := NewTestAgentWithFields(t, true, TestAgent{
 		UseTLS: true,
 		HCL: `
 			key_file = "../test/client_certs/server.key"
 			cert_file = "../test/client_certs/server.crt"
 			ca_file = "../test/client_certs/rootca.crt"
 		`,
-	}
-	a.Start(t)
+	})
 	defer a.Shutdown()
 
 	// Make an HTTP/2-enabled client, using the API helpers to set
@@ -156,6 +155,7 @@ func TestHTTPServer_H2(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 	transport := api.DefaultConfig().Transport
+	transport.TLSHandshakeTimeout = 30 * time.Second
 	transport.TLSClientConfig = tlsccfg
 	if err := http2.ConfigureTransport(transport); err != nil {
 		t.Fatalf("err: %v", err)
@@ -456,8 +456,7 @@ func TestContentTypeIsJSON(t *testing.T) {
 func TestHTTP_wrap_obfuscateLog(t *testing.T) {
 	t.Parallel()
 	buf := new(bytes.Buffer)
-	a := &TestAgent{Name: t.Name(), LogOutput: buf}
-	a.Start(t)
+	a := NewTestAgentWithFields(t, true, TestAgent{LogOutput: buf})
 	defer a.Shutdown()
 
 	handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -499,9 +498,9 @@ func TestHTTP_wrap_obfuscateLog(t *testing.T) {
 			resp := httptest.NewRecorder()
 			req, _ := http.NewRequest("GET", url, nil)
 			a.srv.wrap(handler, []string{"GET"})(resp, req)
-
-			if got := buf.String(); !strings.Contains(got, want) {
-				t.Fatalf("got %s want %s", got, want)
+			bufout := buf.String()
+			if !strings.Contains(bufout, want) {
+				t.Fatalf("got %s want %s", bufout, want)
 			}
 		})
 	}
@@ -741,6 +740,7 @@ func TestParseWait(t *testing.T) {
 		t.Fatalf("Bad: %v", b)
 	}
 }
+
 func TestPProfHandlers_EnableDebug(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
@@ -748,12 +748,13 @@ func TestPProfHandlers_EnableDebug(t *testing.T) {
 	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/debug/pprof/profile", nil)
+	req, _ := http.NewRequest("GET", "/debug/pprof/profile?seconds=1", nil)
 
 	a.srv.Handler.ServeHTTP(resp, req)
 
 	require.Equal(http.StatusOK, resp.Code)
 }
+
 func TestPProfHandlers_DisableDebugNoACLs(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
@@ -1128,97 +1129,6 @@ func TestEnableWebUI(t *testing.T) {
 	}
 }
 
-func TestParseToken_ProxyTokenResolve(t *testing.T) {
-	t.Parallel()
-
-	type endpointCheck struct {
-		endpoint string
-		handler  func(s *HTTPServer, resp http.ResponseWriter, req *http.Request) (interface{}, error)
-	}
-
-	// This is not an exhaustive list of all of our endpoints and is only testing GET endpoints
-	// right now. However it provides decent coverage that the proxy token resolution
-	// is happening properly
-	tests := []endpointCheck{
-		{"/v1/acl/info/root", (*HTTPServer).ACLGet},
-		{"/v1/agent/self", (*HTTPServer).AgentSelf},
-		{"/v1/agent/metrics", (*HTTPServer).AgentMetrics},
-		{"/v1/agent/services", (*HTTPServer).AgentServices},
-		{"/v1/agent/checks", (*HTTPServer).AgentChecks},
-		{"/v1/agent/members", (*HTTPServer).AgentMembers},
-		{"/v1/agent/connect/ca/roots", (*HTTPServer).AgentConnectCARoots},
-		{"/v1/agent/connect/ca/leaf/test", (*HTTPServer).AgentConnectCALeafCert},
-		{"/v1/agent/connect/ca/proxy/test", (*HTTPServer).AgentConnectProxyConfig},
-		{"/v1/catalog/connect", (*HTTPServer).CatalogConnectServiceNodes},
-		{"/v1/catalog/datacenters", (*HTTPServer).CatalogDatacenters},
-		{"/v1/catalog/nodes", (*HTTPServer).CatalogNodes},
-		{"/v1/catalog/node/" + t.Name(), (*HTTPServer).CatalogNodeServices},
-		{"/v1/catalog/services", (*HTTPServer).CatalogServices},
-		{"/v1/catalog/service/test", (*HTTPServer).CatalogServiceNodes},
-		{"/v1/connect/ca/configuration", (*HTTPServer).ConnectCAConfiguration},
-		{"/v1/connect/ca/roots", (*HTTPServer).ConnectCARoots},
-		{"/v1/connect/intentions", (*HTTPServer).IntentionEndpoint},
-		{"/v1/coordinate/datacenters", (*HTTPServer).CoordinateDatacenters},
-		{"/v1/coordinate/nodes", (*HTTPServer).CoordinateNodes},
-		{"/v1/coordinate/node/" + t.Name(), (*HTTPServer).CoordinateNode},
-		{"/v1/event/list", (*HTTPServer).EventList},
-		{"/v1/health/node/" + t.Name(), (*HTTPServer).HealthNodeChecks},
-		{"/v1/health/checks/test", (*HTTPServer).HealthNodeChecks},
-		{"/v1/health/state/passing", (*HTTPServer).HealthChecksInState},
-		{"/v1/health/service/test", (*HTTPServer).HealthServiceNodes},
-		{"/v1/health/connect/test", (*HTTPServer).HealthConnectServiceNodes},
-		{"/v1/operator/raft/configuration", (*HTTPServer).OperatorRaftConfiguration},
-		// keyring endpoint has issues with returning errors if you haven't enabled encryption
-		// {"/v1/operator/keyring", (*HTTPServer).OperatorKeyringEndpoint},
-		{"/v1/operator/autopilot/configuration", (*HTTPServer).OperatorAutopilotConfiguration},
-		{"/v1/operator/autopilot/health", (*HTTPServer).OperatorServerHealth},
-		{"/v1/query", (*HTTPServer).PreparedQueryGeneral},
-		{"/v1/session/list", (*HTTPServer).SessionList},
-		{"/v1/status/leader", (*HTTPServer).StatusLeader},
-		{"/v1/status/peers", (*HTTPServer).StatusPeers},
-	}
-
-	a := NewTestAgent(t, t.Name(), TestACLConfig()+testAllowProxyConfig())
-	defer a.Shutdown()
-
-	// Register a service with a managed proxy
-	{
-		reg := &structs.ServiceDefinition{
-			ID:      "test-id",
-			Name:    "test",
-			Address: "127.0.0.1",
-			Port:    8000,
-			Check: structs.CheckType{
-				TTL: 15 * time.Second,
-			},
-			Connect: &structs.ServiceConnect{
-				Proxy: &structs.ServiceDefinitionConnectProxy{},
-			},
-		}
-
-		req, _ := http.NewRequest("PUT", "/v1/agent/service/register?token=root", jsonReader(reg))
-		resp := httptest.NewRecorder()
-		_, err := a.srv.AgentRegisterService(resp, req)
-		require.NoError(t, err)
-		require.Equal(t, 200, resp.Code, "body: %s", resp.Body.String())
-	}
-
-	// Get the proxy token from the agent directly, since there is no API.
-	proxy := a.State.Proxy("test-id-proxy")
-	require.NotNil(t, proxy)
-	token := proxy.ProxyToken
-	require.NotEmpty(t, token)
-
-	for _, check := range tests {
-		t.Run(fmt.Sprintf("GET(%s)", check.endpoint), func(t *testing.T) {
-			req, _ := http.NewRequest("GET", fmt.Sprintf("%s?token=%s", check.endpoint, token), nil)
-			resp := httptest.NewRecorder()
-			_, err := check.handler(a.srv, resp, req)
-			require.NoError(t, err)
-		})
-	}
-}
-
 func TestAllowedNets(t *testing.T) {
 	type testVal struct {
 		nets     []string
@@ -1280,10 +1190,7 @@ func TestAllowedNets(t *testing.T) {
 			nets = append(nets, in)
 		}
 
-		a := &TestAgent{
-			Name: t.Name(),
-		}
-		a.Start(t)
+		a := NewTestAgent(t, t.Name(), "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -1345,4 +1252,140 @@ func jsonReader(v interface{}) io.Reader {
 		panic(err)
 	}
 	return b
+}
+
+func TestHTTPServer_HandshakeTimeout(t *testing.T) {
+	t.Parallel()
+
+	// Fire up an agent with TLS enabled.
+	a := NewTestAgentWithFields(t, true, TestAgent{
+		UseTLS: true,
+		HCL: `
+			key_file = "../test/client_certs/server.key"
+			cert_file = "../test/client_certs/server.crt"
+			ca_file = "../test/client_certs/rootca.crt"
+
+			limits {
+				https_handshake_timeout = "10ms"
+			}
+		`,
+	})
+	defer a.Shutdown()
+
+	// Connect to it with a plain TCP client that doesn't attempt to send HTTP or
+	// complete a TLS handshake.
+	conn, err := net.Dial("tcp", a.srv.ln.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	// Wait for more than the timeout. This is timing dependent so could fail if
+	// the CPU is super overloaded so the handler goroutine so I'm using a retry
+	// loop below to be sure but this feels like a pretty generous margin for
+	// error (10x the timeout and 100ms of scheduling time).
+	time.Sleep(100 * time.Millisecond)
+
+	// Set a read deadline on the Conn in case the timeout is not working we don't
+	// want the read below to block forever. Needs to be much longer than what we
+	// expect and the error should be different too.
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	retry.Run(t, func(r *retry.R) {
+		// Sanity check the conn was closed by attempting to read from it (a write
+		// might not detect the close).
+		buf := make([]byte, 10)
+		_, err = conn.Read(buf)
+		require.Error(r, err)
+		require.Contains(r, err.Error(), "EOF")
+	})
+}
+
+func TestRPC_HTTPSMaxConnsPerClient(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		tlsEnabled bool
+	}{
+		{"HTTP", false},
+		{"HTTPS", true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+
+			hclPrefix := ""
+			if tc.tlsEnabled {
+				hclPrefix = `
+				key_file = "../test/client_certs/server.key"
+				cert_file = "../test/client_certs/server.crt"
+				ca_file = "../test/client_certs/rootca.crt"
+				`
+			}
+
+			// Fire up an agent with TLS enabled.
+			a := NewTestAgentWithFields(t, true, TestAgent{
+				UseTLS: tc.tlsEnabled,
+				HCL: hclPrefix + `
+					limits {
+						http_max_conns_per_client = 2
+					}
+				`,
+			})
+			defer a.Shutdown()
+
+			addr := a.srv.ln.Addr()
+
+			assertConn := func(conn net.Conn, wantOpen bool) {
+				retry.Run(t, func(r *retry.R) {
+					// Don't wait around as server won't be sending data but the read will fail
+					// immediately if the conn is closed.
+					conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+					buf := make([]byte, 10)
+					_, err := conn.Read(buf)
+					require.Error(r, err)
+					if wantOpen {
+						require.Contains(r, err.Error(), "i/o timeout",
+							"wanted an open conn (read timeout)")
+					} else {
+						require.Contains(r, err.Error(), "EOF", "wanted a closed conn")
+					}
+				})
+			}
+
+			// Connect to the server with bare TCP
+			conn1, err := net.DialTimeout("tcp", addr.String(), time.Second)
+			require.NoError(t, err)
+			defer conn1.Close()
+
+			assertConn(conn1, true)
+
+			// Two conns should succeed
+			conn2, err := net.DialTimeout("tcp", addr.String(), time.Second)
+			require.NoError(t, err)
+			defer conn2.Close()
+
+			assertConn(conn2, true)
+
+			// Third should succeed negotiating TCP handshake...
+			conn3, err := net.DialTimeout("tcp", addr.String(), time.Second)
+			require.NoError(t, err)
+			defer conn3.Close()
+
+			// But then be closed.
+			assertConn(conn3, false)
+
+			// Reload config with higher limit
+			newCfg := *a.config
+			newCfg.HTTPMaxConnsPerClient = 10
+			require.NoError(t, a.ReloadConfig(&newCfg))
+
+			// Now another conn should be allowed
+			conn4, err := net.DialTimeout("tcp", addr.String(), time.Second)
+			require.NoError(t, err)
+			defer conn4.Close()
+
+			assertConn(conn4, true)
+		})
+	}
 }

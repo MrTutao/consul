@@ -2,6 +2,7 @@ package pool
 
 import (
 	"container/list"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -10,9 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib"
 	"github.com/hashicorp/consul/tlsutil"
-	"github.com/hashicorp/net-rpc-msgpackrpc"
+	msgpackrpc "github.com/hashicorp/net-rpc-msgpackrpc"
 	"github.com/hashicorp/yamux"
 )
 
@@ -75,7 +77,7 @@ func (c *Conn) getClient() (*StreamClient, error) {
 	}
 
 	// Create the RPC client
-	codec := msgpackrpc.NewClientCodec(stream)
+	codec := msgpackrpc.NewCodecFromHandle(true, true, stream, structs.MsgpackHandle)
 
 	// Return a new stream client
 	sc := &StreamClient{
@@ -257,11 +259,8 @@ func (p *ConnPool) acquire(dc string, addr net.Addr, version int, useTLS bool) (
 	return nil, fmt.Errorf("rpc error: lead thread didn't get connection")
 }
 
-// HalfCloser is an interface that exposes a TCP half-close. We need this
-// because we want to expose the raw TCP connection underlying a TLS one in a
-// way that's hard to screw up and use for anything else. There's a change
-// brewing that will allow us to use the TLS connection for this instead -
-// https://go-review.googlesource.com/#/c/25159/.
+// HalfCloser is an interface that exposes a TCP half-close without exposing
+// the underlying TLS or raw TCP connection.
 type HalfCloser interface {
 	CloseWrite() error
 }
@@ -296,11 +295,13 @@ func DialTimeoutWithRPCType(dc string, addr net.Addr, src *net.TCPAddr, timeout 
 		return nil, nil, err
 	}
 
-	// Cast to TCPConn
 	var hc HalfCloser
+
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		tcp.SetKeepAlive(true)
 		tcp.SetNoDelay(true)
+
+		// Expose TCPConn CloseWrite method on HalfCloser
 		hc = tcp
 	}
 
@@ -319,6 +320,11 @@ func DialTimeoutWithRPCType(dc string, addr net.Addr, src *net.TCPAddr, timeout 
 			return nil, nil, err
 		}
 		conn = tlsConn
+
+		// If this is a tls.Conn, expose HalfCloser to caller
+		if tlsConn, ok := conn.(*tls.Conn); ok {
+			hc = tlsConn
+		}
 	}
 
 	return conn, hc, nil
@@ -438,7 +444,7 @@ func (p *ConnPool) rpcInsecure(dc string, addr net.Addr, method string, args int
 	if err != nil {
 		return fmt.Errorf("rpcinsecure error establishing connection: %v", err)
 	}
-	codec = msgpackrpc.NewClientCodec(conn)
+	codec = msgpackrpc.NewCodecFromHandle(true, true, conn, structs.MsgpackHandle)
 
 	// Make the RPC call
 	err = msgpackrpc.CallWithCodec(codec, method, args, reply)

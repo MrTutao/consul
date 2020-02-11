@@ -1,11 +1,12 @@
 SHELL = bash
+GOGOVERSION?=$(shell grep github.com/gogo/protobuf go.mod | awk '{print $$2}')
 GOTOOLS = \
-	github.com/elazarl/go-bindata-assetfs/go-bindata-assetfs \
-	github.com/hashicorp/go-bindata/go-bindata \
-	github.com/mitchellh/gox \
+	github.com/elazarl/go-bindata-assetfs/go-bindata-assetfs@master \
+	github.com/hashicorp/go-bindata/go-bindata@master \
 	golang.org/x/tools/cmd/cover \
 	golang.org/x/tools/cmd/stringer \
-	github.com/gogo/protobuf/protoc-gen-gofast \
+	github.com/gogo/protobuf/protoc-gen-gofast@$(GOGOVERSION) \
+	github.com/hashicorp/protoc-gen-go-binary \
 	github.com/vektra/mockery/cmd/mockery
 
 GOTAGS ?=
@@ -19,14 +20,20 @@ endif
 GOOS?=$(shell go env GOOS)
 GOARCH?=$(shell go env GOARCH)
 GOPATH=$(shell go env GOPATH)
+MAIN_GOPATH=$(shell go env GOPATH | cut -d: -f1)
 
 ASSETFS_PATH?=agent/bindata_assetfs.go
 # Get the git commit
 GIT_COMMIT?=$(shell git rev-parse --short HEAD)
+GIT_COMMIT_YEAR?=$(shell git show -s --format=%cd --date=format:%Y HEAD)
 GIT_DIRTY?=$(shell test -n "`git status --porcelain`" && echo "+CHANGES" || true)
 GIT_DESCRIBE?=$(shell git describe --tags --always --match "v*")
 GIT_IMPORT=github.com/hashicorp/consul/version
 GOLDFLAGS=-X $(GIT_IMPORT).GitCommit=$(GIT_COMMIT)$(GIT_DIRTY) -X $(GIT_IMPORT).GitDescribe=$(GIT_DESCRIBE)
+
+PROTOFILES?=$(shell find . -name '*.proto' | grep -v 'vendor/')
+PROTOGOFILES=$(PROTOFILES:.proto=.pb.go)
+PROTOGOBINFILES=$(PROTOFILES:.proto=.pb.binary.go)
 
 ifeq ($(FORCE_REBUILD),1)
 NOCACHE=--no-cache
@@ -46,6 +53,38 @@ GO_BUILD_TAG?=consul-build-go
 UI_BUILD_TAG?=consul-build-ui
 BUILD_CONTAINER_NAME?=consul-builder
 CONSUL_IMAGE_VERSION?=latest
+
+################
+# CI Variables #
+################
+CI_DEV_DOCKER_NAMESPACE?=hashicorpdev
+CI_DEV_DOCKER_IMAGE_NAME?=consul
+CI_DEV_DOCKER_WORKDIR?=bin/
+################
+
+TEST_MODCACHE?=1
+TEST_BUILDCACHE?=1
+
+# You can only use as many CPUs as you have allocated to docker
+ifdef TEST_DOCKER_CPUS
+TEST_DOCKER_RESOURCE_CONSTRAINTS=--cpus $(TEST_DOCKER_CPUS)
+TEST_PARALLELIZATION=-e GOMAXPROCS=$(TEST_DOCKER_CPUS)
+else
+TEST_DOCKER_RESOURCE_CONSTRAINTS=
+TEST_PARALLELIZATION=
+endif
+
+ifeq ($(TEST_MODCACHE), 1)
+TEST_MODCACHE_VOL=-v $(MAIN_GOPATH)/pkg/mod:/go/pkg/mod
+else
+TEST_MODCACHE_VOL=
+endif
+
+ifeq ($(TEST_BUILDCACHE), 1)
+TEST_BUILDCACHE_VOL=-v $(shell go env GOCACHE):/root/.caches/go-build
+else
+TEST_BUILDCACHE_VOL=
+endif
 
 DIST_TAG?=1
 DIST_BUILD?=1
@@ -84,13 +123,12 @@ else
 PUB_WEBSITE_ARG=
 endif
 
-NOGOX?=1
 
-export NOGOX
 export GO_BUILD_TAG
 export UI_BUILD_TAG
 export BUILD_CONTAINER_NAME
 export GIT_COMMIT
+export GIT_COMMIT_YEAR
 export GIT_DIRTY
 export GIT_DESCRIBE
 export GOTAGS
@@ -131,6 +169,26 @@ dev-docker: linux
 	@echo "Building Consul Development container - $(CONSUL_DEV_IMAGE)"
 	@docker build $(NOCACHE) $(QUIET) -t '$(CONSUL_DEV_IMAGE)' --build-arg CONSUL_IMAGE_VERSION=$(CONSUL_IMAGE_VERSION) $(CURDIR)/pkg/bin/linux_amd64 -f $(CURDIR)/build-support/docker/Consul-Dev.dockerfile
 
+# In CircleCI, the linux binary will be attached from a previous step at bin/. This make target
+# should only run in CI and not locally.
+ci.dev-docker:
+	@echo "Pulling consul container image - $(CONSUL_IMAGE_VERSION)"
+	@docker pull consul:$(CONSUL_IMAGE_VERSION) >/dev/null
+	@echo "Building Consul Development container - $(CI_DEV_DOCKER_IMAGE_NAME)"
+	@docker build $(NOCACHE) $(QUIET) -t '$(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)' \
+	--build-arg CONSUL_IMAGE_VERSION=$(CONSUL_IMAGE_VERSION) \
+	--label COMMIT_SHA=$(CIRCLE_SHA1) \
+	--label PULL_REQUEST=$(CIRCLE_PULL_REQUEST) \
+	--label CIRCLE_BUILD_URL=$(CIRCLE_BUILD_URL) \
+	$(CI_DEV_DOCKER_WORKDIR) -f $(CURDIR)/build-support/docker/Consul-Dev.dockerfile
+	@echo $(DOCKER_PASS) | docker login -u="$(DOCKER_USER)" --password-stdin
+	@echo "Pushing dev image to: https://cloud.docker.com/u/hashicorpdev/repository/docker/hashicorpdev/consul"
+	@docker push $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT)
+ifeq ($(CIRCLE_BRANCH), master)
+	@docker tag $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):$(GIT_COMMIT) $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest
+	@docker push $(CI_DEV_DOCKER_NAMESPACE)/$(CI_DEV_DOCKER_IMAGE_NAME):latest
+endif
+
 changelogfmt:
 	@echo "--> Making [GH-xxxx] references clickable..."
 	@sed -E 's|([^\[])\[GH-([0-9]+)\]|\1[[GH-\2](https://github.com/hashicorp/consul/issues/\2)]|g' CHANGELOG.md > changelog.tmp && mv changelog.tmp CHANGELOG.md
@@ -161,7 +219,13 @@ test: other-consul dev-build vet test-install-deps test-internal
 test-install-deps:
 	go test -tags '$(GOTAGS)' -i $(GOTEST_PKGS)
 
-update-vendor:
+go-mod-tidy:
+	@echo "--> Running go mod tidy"
+	@cd sdk && go mod tidy
+	@cd api && go mod tidy
+	@go mod tidy
+
+update-vendor: go-mod-tidy
 	@echo "--> Running go mod vendor"
 	@go mod vendor
 	@echo "--> Removing vendoring of our own nested modules"
@@ -211,6 +275,35 @@ test-ci: other-consul dev-build vet test-install-deps
 test-flake: other-consul vet test-install-deps
 	@$(SHELL) $(CURDIR)/build-support/scripts/test-flake.sh --pkg "$(FLAKE_PKG)" --test "$(FLAKE_TEST)" --cpus "$(FLAKE_CPUS)" --n "$(FLAKE_N)"
 
+test-docker: linux go-build-image
+	@# -ti run in the foreground showing stdout
+	@# --rm removes the container once its finished running
+	@# GO_MODCACHE_VOL - args for mapping in the go module cache
+	@# GO_BUILD_CACHE_VOL - args for mapping in the go build cache
+	@# All the env vars are so we pass through all the relevant bits of information
+	@# Needed for running the tests
+	@# We map in our local linux_amd64 bin directory as thats where the linux dep
+	@#   target dropped the binary. We could build the binary in the container too
+	@#   but that might take longer as caching gets weird
+	@# Lastly we map the source dir here to the /consul workdir
+	@echo "Running tests within a docker container"
+	@docker run -ti --rm \
+		-e 'GOTEST_FLAGS=$(GOTEST_FLAGS)' \
+		-e 'GOTEST_PKGS=$(GOTEST_PKGS)' \
+		-e 'GOTAGS=$(GOTAGS)' \
+		-e 'GIT_COMMIT=$(GIT_COMMIT)' \
+		-e 'GIT_COMMIT_YEAR=$(GIT_COMMIT_YEAR)' \
+		-e 'GIT_DIRTY=$(GIT_DIRTY)' \
+		-e 'GIT_DESCRIBE=$(GIT_DESCRIBE)' \
+		$(TEST_PARALLELIZATION) \
+		$(TEST_DOCKER_RESOURCE_CONSTRAINTS) \
+		$(TEST_MODCACHE_VOL) \
+		$(TEST_BUILDCACHE_VOL) \
+		-v $(MAIN_GOPATH)/bin/linux_amd64/:/go/bin \
+		-v $(shell pwd):/consul \
+		$(GO_BUILD_TAG) \
+		make test-internal
+
 other-consul:
 	@echo "--> Checking for other consul instances"
 	@if ps -ef | grep 'consul agent' | grep -v grep ; then \
@@ -223,11 +316,15 @@ cover:
 
 format:
 	@echo "--> Running go fmt"
-	@go fmt $(GOFILES)
+	@go fmt ./...
+	@cd api && go fmt ./... | sed 's@^@api/@'
+	@cd sdk && go fmt ./... | sed 's@^@sdk/@'
 
 vet:
 	@echo "--> Running go vet"
-	@go vet -tags '$(GOTAGS)' $(GOFILES); if [ $$? -eq 1 ]; then \
+	@go vet -tags '$(GOTAGS)' ./... && \
+		(cd api && go vet -tags '$(GOTAGS)' ./...) && \
+		(cd sdk && go vet -tags '$(GOTAGS)' ./...); if [ $$? -ne 0 ]; then \
 		echo ""; \
 		echo "Vet found suspicious constructs. Please check the reported constructs"; \
 		echo "and fix them if necessary before submitting the code for review."; \
@@ -246,7 +343,11 @@ static-assets:
 ui: ui-docker static-assets-docker
 
 tools:
-	go get -u -v $(GOTOOLS)
+	@mkdir -p .gotools
+	@cd .gotools && if [[ ! -f go.mod ]]; then \
+		go mod init consul-tools ; \
+	fi
+	cd .gotools && go get -v $(GOTOOLS)
 
 version:
 	@echo -n "Version:                    "
@@ -281,9 +382,32 @@ ui-docker: ui-build-image
 test-envoy-integ: $(ENVOY_INTEG_DEPS)
 	@$(SHELL) $(CURDIR)/test/integration/connect/envoy/run-tests.sh
 
-proto:
-	protoc agent/connect/ca/plugin/*.proto --gofast_out=plugins=grpc:../../..
+test-vault-ca-provider:
+ifeq ("$(CIRCLECI)","true")
+# Run in CI
+	gotestsum --format=short-verbose --junitfile "$(TEST_RESULTS_DIR)/gotestsum-report.xml" -- $(CURDIR)/agent/connect/ca/* -run 'TestVault(CA)?Provider'
+else
+# Run locally
+	@echo "Running /agent/connect/ca TestVault(CA)?Provider tests in verbose mode"
+	@go test $(CURDIR)/agent/connect/ca/* -run 'TestVault(CA)?Provider' -v
+endif
+
+proto-delete:
+	@echo "Removing $(PROTOGOFILES)"
+	-@rm $(PROTOGOFILES)
+	@echo "Removing $(PROTOGOBINFILES)"
+	-@rm $(PROTOGOBINFILES)
+
+proto-rebuild: proto-delete proto
+
+proto: $(PROTOGOFILES) $(PROTOGOBINFILES)
+	@echo "Generated all protobuf Go files"
+
+
+%.pb.go %.pb.binary.go: %.proto
+	@$(SHELL) $(CURDIR)/build-support/scripts/proto-gen.sh --grpc --import-replace "$<"
+
 
 .PHONY: all ci bin dev dist cov test test-ci test-internal test-install-deps cover format vet ui static-assets tools
 .PHONY: docker-images go-build-image ui-build-image static-assets-docker consul-docker ui-docker
-.PHONY: version proto test-envoy-integ
+.PHONY: version proto proto-rebuild proto-delete test-envoy-integ

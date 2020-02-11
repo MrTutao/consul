@@ -1,6 +1,6 @@
 <% wrap_layout :inner do %>
   <% content_for :sidebar do %>
-    <ul class="nav docs-sidenav">
+    <ul class="nav docs-sidenav g-type-body-small">
       <li<%= sidebar_current('docs-install') %>>
         <a href="/docs/install/index.html">Installing Consul</a>
         <ul class="nav">
@@ -61,6 +61,9 @@
           </li>
           <li<%= sidebar_current("docs-internals-jepsen") %>>
             <a href="/docs/internals/jepsen.html">Jepsen Testing</a>
+          </li>
+          <li<%= sidebar_current("docs-internals-discovery-chain") %>>
+            <a href="/docs/internals/discovery-chain.html">Discovery Chain</a>
           </li>
         </ul>
       </li>
@@ -323,6 +326,24 @@
           <li<%= sidebar_current("docs-commands-monitor") %>>
             <a href="/docs/commands/monitor.html">monitor</a>
           </li>
+          
+          <li<%=sidebar_current("docs-commands-namespace") %>>
+            <a href="/docs/commands/namespace.html">namespace</a>
+            <ul class="nav">
+              <li<%= sidebar_current("docs-commands-namespace-delete") %>>
+                <a href="/docs/commands/namespace/delete.html">delete</a>
+              </li>
+              <li<%= sidebar_current("docs-commands-namespace-list") %>>
+                <a href="/docs/commands/namespace/list.html">list</a>
+              </li>
+              <li<%= sidebar_current("docs-commands-namespace-read") %>>
+                <a href="/docs/commands/namespace/read.html">read</a>
+              </li>
+              <li<%= sidebar_current("docs-commands-namespace-write") %>>
+                <a href="/docs/commands/namespace/write.html">write</a>
+              </li>
+            </ul>
+          </li>
 
           <li<%= sidebar_current("docs-commands-operator") %>>
             <a href="/docs/commands/operator.html">operator</a>
@@ -414,6 +435,23 @@
           </li>
           <li<%= sidebar_current("docs-agent-cfg_entries") %>>
             <a href="/docs/agent/config_entries.html">Configuration Entries</a>
+            <ul class="nav">
+              <li<%= sidebar_current("docs-agent-cfg_entries-service_router") %>>
+                <a href="/docs/agent/config-entries/service-router.html">service-router</a>
+              </li>
+              <li<%= sidebar_current("docs-agent-cfg_entries-service_splitter") %>>
+                <a href="/docs/agent/config-entries/service-splitter.html">service-splitter</a>
+              </li>
+              <li<%= sidebar_current("docs-agent-cfg_entries-service_resolver") %>>
+                <a href="/docs/agent/config-entries/service-resolver.html">service-resolver</a>
+              </li>
+              <li<%= sidebar_current("docs-agent-cfg_entries-service_defaults") %>>
+                <a href="/docs/agent/config-entries/service-defaults.html">service-defaults</a>
+              </li>
+              <li<%= sidebar_current("docs-agent-cfg_entries-proxy_defaults") %>>
+                <a href="/docs/agent/config-entries/proxy-defaults.html">proxy-defaults</a>
+              </li>
+            </ul>
           </li>
           <li<%= sidebar_current("docs-agent-cloud-auto-join") %>>
             <a href="/docs/agent/cloud-auto-join.html">Cloud Auto-join</a>
@@ -477,13 +515,15 @@
           <li<%= sidebar_current("docs-connect-observability") %>>
             <a href="/docs/connect/observability.html">Observability</a>
           </li>
-        </li>
-        <li<%= sidebar_current("docs-connect-intentions") %>>
-          <a href="/docs/connect/intentions.html">Intentions - Security Policies</a>
-        </li>
-        <li<%= sidebar_current("docs-connect-internals") %>>
-          <a href="/docs/connect/connect-internals.html">Architecture</a>
-        </li>
+          <li<%= sidebar_current("docs-connect-l7_traffic_management") %>>
+            <a href="/docs/connect/l7-traffic-management.html">L7 Traffic Management</a>
+          </li>
+          <li<%= sidebar_current("docs-connect-intentions") %>>
+            <a href="/docs/connect/intentions.html">Intentions - Security Policies</a>
+          </li>
+          <li<%= sidebar_current("docs-connect-internals") %>>
+            <a href="/docs/connect/connect-internals.html">Architecture</a>
+          </li>
           <li<%= sidebar_current("docs-connect-proxies") %>>
             <a href="/docs/connect/proxies.html">Supported Proxies</a>
             <ul class="nav">
@@ -497,6 +537,9 @@
                 <a href="/docs/connect/proxies/integrate.html">Proxy Integration</a>
               </li>
             </ul>
+          </li>
+          <li<%= sidebar_current("docs-connect-meshgateways") %>>
+             <a href="/docs/connect/mesh_gateway.html">Mesh Gateways</a>
           </li>
           <li<%= sidebar_current("docs-connect-registration") %>>
             <a href="/docs/connect/registration.html">Registering Proxies</a>
@@ -520,6 +563,9 @@
               </li>
               <li<%= sidebar_current("docs-connect-ca-vault") %>>
                 <a href="/docs/connect/ca/vault.html">Vault</a>
+              </li>
+              <li<%= sidebar_current("docs-connect-ca-aws") %>>
+                <a href="/docs/connect/ca/aws.html">ACM Private CA</a>
               </li>
             </ul>
           </li>
@@ -547,14 +593,44 @@
         <a href="/docs/platform/k8s/index.html">Kubernetes</a>
         <ul class="nav">
           <li<%= sidebar_current("docs-platform-k8s-run") %>>
-            <a href="/docs/platform/k8s/run.html">Running Consul</a>
+            <a href="/docs/platform/k8s/run.html">Installation</a>
+            <ul class="nav">
+              <li<%= sidebar_current("docs-platform-k8s-run-aks") %>>
+                <a href="/docs/platform/k8s/aks.html">Azure Kubernetes Service (AKS)</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-gke") %>>
+                <a href="/docs/platform/k8s/gke.html">Google Kubernetes Service (GKE)</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-mini") %>>
+                <a href="/docs/platform/k8s/minikube.html">Minikube</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-consul-ent") %>>
+                <a href="/docs/platform/k8s/consul-enterprise.html">Consul Enterprise</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-clients-outside") %>>
+                <a href="/docs/platform/k8s/clients-outside-kubernetes.html">Consul Clients Outside Kubernetes</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-servers-outside") %>>
+                <a href="/docs/platform/k8s/servers-outside-kubernetes.html">Consul Servers Outside Kubernetes</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-run-pvcs") %>>
+                <a href="/docs/platform/k8s/predefined-pvcs.html">Predefined Persistent Volume Claims</a>
+              </li>
+            </ul>
           </li>
-          <li<%= sidebar_current("docs-platform-k8s-helm") %>>
-            <a href="/docs/platform/k8s/helm.html">Helm Chart</a>
-          </li>
-          <li<%= sidebar_current("docs-platform-k8s-ooc-nodes") %>>
-            <a href="/docs/platform/k8s/out-of-cluster-nodes.html">Out-of-Cluster Nodes</a>
-          </li>
+          <li<%= sidebar_current("docs-platform-k8s-ops") %>>
+            <a href="/docs/platform/k8s/operations.html">Operations</a>
+            <ul class="nav">
+              <li<%= sidebar_current("docs-platform-k8s-ops-upgrading") %>>
+                <a href="/docs/platform/k8s/upgrading.html">Upgrading</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-ops-tls-on-existing-cluster") %>>
+                <a href="/docs/platform/k8s/tls-on-existing-cluster.html">Configuring TLS on an Existing Cluster</a>
+              </li>
+              <li<%= sidebar_current("docs-platform-k8s-ops-uninstalling") %>>
+                <a href="/docs/platform/k8s/uninstalling.html">Uninstalling</a>
+              </li>
+            </ul>
           <li<%= sidebar_current("docs-platform-k8s-dns") %>>
             <a href="/docs/platform/k8s/dns.html">Consul DNS</a>
           </li>
@@ -566,6 +642,9 @@
           </li>
           <li<%= sidebar_current("docs-platform-k8s-ambassador") %>>
             <a href="/docs/platform/k8s/ambassador.html">Ambassador Integration</a>
+          </li>
+          <li<%= sidebar_current("docs-platform-k8s-helm") %>>
+            <a href="/docs/platform/k8s/helm.html">Helm Chart Reference</a>
           </li>
         </ul>
       </li>
@@ -586,6 +665,10 @@
 
       <hr>
 
+      <li<%= sidebar_current("docs-consul-program") %>>
+      <a href="/docs/partnerships/index.html">Consul Integration Program</a>
+      </li>
+
       <li<%= sidebar_current("docs-enterprise") %>>
         <a href="/docs/enterprise/index.html">Consul Enterprise</a>
         <ul class="nav">
@@ -604,11 +687,11 @@
           <li<%= sidebar_current("docs-enterprise-federation") %>>
             <a href="/docs/enterprise/federation/index.html">Advanced Federation</a>
           </li>
-          <li<%= sidebar_current("docs-enterprise-connect-multi-datacenter") %>>
-            <a href="/docs/enterprise/connect-multi-datacenter/index.html">Connect Multi-Datacenter</a>
-          </li>
           <li<%= sidebar_current("docs-enterprise-network-segments") %>>
             <a href="/docs/enterprise/network-segments/index.html">Network Segments</a>
+          </li>
+          <li<%= sidebar_current("docs-enterprise-namespaces") %>>
+            <a href="/docs/enterprise/namespaces/index.html">Namespaces</a>
           </li>
           <li<%= sidebar_current("docs-enterprise-sentinel") %>>
             <a href="/docs/enterprise/sentinel/index.html">Sentinel</a>

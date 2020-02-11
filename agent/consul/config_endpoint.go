@@ -19,10 +19,24 @@ type ConfigEntry struct {
 
 // Apply does an upsert of the given config entry.
 func (c *ConfigEntry) Apply(args *structs.ConfigEntryRequest, reply *bool) error {
+	if err := c.srv.validateEnterpriseRequest(args.Entry.GetEnterpriseMeta(), true); err != nil {
+		return err
+	}
+
+	// Ensure that all config entry writes go to the primary datacenter. These will then
+	// be replicated to all the other datacenters.
+	args.Datacenter = c.srv.config.PrimaryDatacenter
+
 	if done, err := c.srv.forward("ConfigEntry.Apply", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "apply"}, time.Now())
+
+	entMeta := args.Entry.GetEnterpriseMeta()
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, entMeta, nil)
+	if err != nil {
+		return err
+	}
 
 	// Normalize and validate the incoming config entry.
 	if err := args.Entry.Normalize(); err != nil {
@@ -32,12 +46,7 @@ func (c *ConfigEntry) Apply(args *structs.ConfigEntryRequest, reply *bool) error
 		return err
 	}
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
-	if err != nil {
-		return err
-	}
-	if rule != nil && !args.Entry.CanWrite(rule) {
+	if authz != nil && !args.Entry.CanWrite(authz) {
 		return acl.ErrPermissionDenied
 	}
 
@@ -60,13 +69,16 @@ func (c *ConfigEntry) Apply(args *structs.ConfigEntryRequest, reply *bool) error
 
 // Get returns a single config entry by Kind/Name.
 func (c *ConfigEntry) Get(args *structs.ConfigEntryQuery, reply *structs.ConfigEntryResponse) error {
+	if err := c.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
 	if done, err := c.srv.forward("ConfigEntry.Get", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "get"}, time.Now())
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, nil)
 	if err != nil {
 		return err
 	}
@@ -76,7 +88,9 @@ func (c *ConfigEntry) Get(args *structs.ConfigEntryQuery, reply *structs.ConfigE
 	if err != nil {
 		return err
 	}
-	if rule != nil && !lookupEntry.CanRead(rule) {
+	lookupEntry.GetEnterpriseMeta().Merge(&args.EnterpriseMeta)
+
+	if authz != nil && !lookupEntry.CanRead(authz) {
 		return acl.ErrPermissionDenied
 	}
 
@@ -84,7 +98,7 @@ func (c *ConfigEntry) Get(args *structs.ConfigEntryQuery, reply *structs.ConfigE
 		&args.QueryOptions,
 		&reply.QueryMeta,
 		func(ws memdb.WatchSet, state *state.Store) error {
-			index, entry, err := state.ConfigEntry(ws, args.Kind, args.Name)
+			index, entry, err := state.ConfigEntry(ws, args.Kind, args.Name, &args.EnterpriseMeta)
 			if err != nil {
 				return err
 			}
@@ -102,13 +116,16 @@ func (c *ConfigEntry) Get(args *structs.ConfigEntryQuery, reply *structs.ConfigE
 // List returns all the config entries of the given kind. If Kind is blank,
 // all existing config entries will be returned.
 func (c *ConfigEntry) List(args *structs.ConfigEntryQuery, reply *structs.IndexedConfigEntries) error {
+	if err := c.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
 	if done, err := c.srv.forward("ConfigEntry.List", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "list"}, time.Now())
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, nil)
 	if err != nil {
 		return err
 	}
@@ -121,7 +138,7 @@ func (c *ConfigEntry) List(args *structs.ConfigEntryQuery, reply *structs.Indexe
 		&args.QueryOptions,
 		&reply.QueryMeta,
 		func(ws memdb.WatchSet, state *state.Store) error {
-			index, entries, err := state.ConfigEntriesByKind(ws, args.Kind)
+			index, entries, err := state.ConfigEntriesByKind(ws, args.Kind, &args.EnterpriseMeta)
 			if err != nil {
 				return err
 			}
@@ -129,7 +146,7 @@ func (c *ConfigEntry) List(args *structs.ConfigEntryQuery, reply *structs.Indexe
 			// Filter the entries returned by ACL permissions.
 			filteredEntries := make([]structs.ConfigEntry, 0, len(entries))
 			for _, entry := range entries {
-				if rule != nil && !entry.CanRead(rule) {
+				if authz != nil && !entry.CanRead(authz) {
 					continue
 				}
 				filteredEntries = append(filteredEntries, entry)
@@ -144,13 +161,16 @@ func (c *ConfigEntry) List(args *structs.ConfigEntryQuery, reply *structs.Indexe
 
 // ListAll returns all the known configuration entries
 func (c *ConfigEntry) ListAll(args *structs.DCSpecificRequest, reply *structs.IndexedGenericConfigEntries) error {
+	if err := c.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
 	if done, err := c.srv.forward("ConfigEntry.ListAll", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "listAll"}, time.Now())
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, nil)
 	if err != nil {
 		return err
 	}
@@ -159,7 +179,7 @@ func (c *ConfigEntry) ListAll(args *structs.DCSpecificRequest, reply *structs.In
 		&args.QueryOptions,
 		&reply.QueryMeta,
 		func(ws memdb.WatchSet, state *state.Store) error {
-			index, entries, err := state.ConfigEntries(ws)
+			index, entries, err := state.ConfigEntries(ws, &args.EnterpriseMeta)
 			if err != nil {
 				return err
 			}
@@ -167,7 +187,7 @@ func (c *ConfigEntry) ListAll(args *structs.DCSpecificRequest, reply *structs.In
 			// Filter the entries returned by ACL permissions.
 			filteredEntries := make([]structs.ConfigEntry, 0, len(entries))
 			for _, entry := range entries {
-				if rule != nil && !entry.CanRead(rule) {
+				if authz != nil && !entry.CanRead(authz) {
 					continue
 				}
 				filteredEntries = append(filteredEntries, entry)
@@ -181,22 +201,30 @@ func (c *ConfigEntry) ListAll(args *structs.DCSpecificRequest, reply *structs.In
 
 // Delete deletes a config entry.
 func (c *ConfigEntry) Delete(args *structs.ConfigEntryRequest, reply *struct{}) error {
+	if err := c.srv.validateEnterpriseRequest(args.Entry.GetEnterpriseMeta(), true); err != nil {
+		return err
+	}
+
+	// Ensure that all config entry writes go to the primary datacenter. These will then
+	// be replicated to all the other datacenters.
+	args.Datacenter = c.srv.config.PrimaryDatacenter
+
 	if done, err := c.srv.forward("ConfigEntry.Delete", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "delete"}, time.Now())
+
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, args.Entry.GetEnterpriseMeta(), nil)
+	if err != nil {
+		return err
+	}
 
 	// Normalize the incoming entry.
 	if err := args.Entry.Normalize(); err != nil {
 		return err
 	}
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
-	if err != nil {
-		return err
-	}
-	if rule != nil && !args.Entry.CanWrite(rule) {
+	if authz != nil && !args.Entry.CanWrite(authz) {
 		return acl.ErrPermissionDenied
 	}
 
@@ -213,17 +241,21 @@ func (c *ConfigEntry) Delete(args *structs.ConfigEntryRequest, reply *struct{}) 
 
 // ResolveServiceConfig
 func (c *ConfigEntry) ResolveServiceConfig(args *structs.ServiceConfigRequest, reply *structs.ServiceConfigResponse) error {
+	if err := c.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
 	if done, err := c.srv.forward("ConfigEntry.ResolveServiceConfig", args, args, reply); done {
 		return err
 	}
 	defer metrics.MeasureSince([]string{"config_entry", "resolve_service_config"}, time.Now())
 
-	// Fetch the ACL token, if any.
-	rule, err := c.srv.ResolveToken(args.Token)
+	var authzContext acl.AuthorizerContext
+	authz, err := c.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, &authzContext)
 	if err != nil {
 		return err
 	}
-	if rule != nil && !rule.ServiceRead(args.Name) {
+	if authz != nil && authz.ServiceRead(args.Name, &authzContext) != acl.Allow {
 		return acl.ErrPermissionDenied
 	}
 
@@ -231,10 +263,13 @@ func (c *ConfigEntry) ResolveServiceConfig(args *structs.ServiceConfigRequest, r
 		&args.QueryOptions,
 		&reply.QueryMeta,
 		func(ws memdb.WatchSet, state *state.Store) error {
+			reply.Reset()
+
+			reply.MeshGateway.Mode = structs.MeshGatewayModeDefault
 			// Pass the WatchSet to both the service and proxy config lookups. If either is updated
 			// during the blocking query, this function will be rerun and these state store lookups
 			// will both be current.
-			index, serviceEntry, err := state.ConfigEntry(ws, structs.ServiceDefaults, args.Name)
+			index, serviceEntry, err := state.ConfigEntry(ws, structs.ServiceDefaults, args.Name, &args.EnterpriseMeta)
 			if err != nil {
 				return err
 			}
@@ -247,7 +282,9 @@ func (c *ConfigEntry) ResolveServiceConfig(args *structs.ServiceConfigRequest, r
 				}
 			}
 
-			_, proxyEntry, err := state.ConfigEntry(ws, structs.ProxyDefaults, structs.ProxyConfigGlobal)
+			// Use the default enterprise meta to look up the global proxy defaults. In the future we may allow per-namespace proxy-defaults
+			// but not yet.
+			_, proxyEntry, err := state.ConfigEntry(ws, structs.ProxyDefaults, structs.ProxyConfigGlobal, structs.DefaultEnterpriseMeta())
 			if err != nil {
 				return err
 			}
@@ -263,20 +300,54 @@ func (c *ConfigEntry) ResolveServiceConfig(args *structs.ServiceConfigRequest, r
 					return fmt.Errorf("failed to copy global proxy-defaults: %v", err)
 				}
 				reply.ProxyConfig = mapCopy.(map[string]interface{})
+				reply.MeshGateway = proxyConf.MeshGateway
+				reply.Expose = proxyConf.Expose
 			}
 
 			reply.Index = index
 
-			if serviceConf != nil && serviceConf.Protocol != "" {
-				if reply.ProxyConfig == nil {
-					reply.ProxyConfig = make(map[string]interface{})
+			if serviceConf != nil {
+				if serviceConf.Expose.Checks {
+					reply.Expose.Checks = true
 				}
-				reply.ProxyConfig["protocol"] = serviceConf.Protocol
+				if len(serviceConf.Expose.Paths) >= 1 {
+					reply.Expose.Paths = serviceConf.Expose.Paths
+				}
+				if serviceConf.MeshGateway.Mode != structs.MeshGatewayModeDefault {
+					reply.MeshGateway.Mode = serviceConf.MeshGateway.Mode
+				}
+				if serviceConf.Protocol != "" {
+					if reply.ProxyConfig == nil {
+						reply.ProxyConfig = make(map[string]interface{})
+					}
+					reply.ProxyConfig["protocol"] = serviceConf.Protocol
+				}
 			}
 
-			// Apply the upstream protocols to the upstream configs
-			for _, upstream := range args.Upstreams {
-				_, upstreamEntry, err := state.ConfigEntry(ws, structs.ServiceDefaults, upstream)
+			// Extract the global protocol from proxyConf for upstream configs.
+			var proxyConfGlobalProtocol interface{}
+			if proxyConf != nil && proxyConf.Config != nil {
+				proxyConfGlobalProtocol = proxyConf.Config["protocol"]
+			}
+
+			// map the legacy request structure using only service names
+			// to the new ServiceID type.
+			upstreamIDs := args.UpstreamIDs
+			legacyUpstreams := false
+
+			if len(upstreamIDs) == 0 {
+				legacyUpstreams = true
+
+				upstreamIDs = make([]structs.ServiceID, 0)
+				for _, upstream := range args.Upstreams {
+					upstreamIDs = append(upstreamIDs, structs.NewServiceID(upstream, &args.EnterpriseMeta))
+				}
+			}
+
+			usConfigs := make(map[structs.ServiceID]map[string]interface{})
+
+			for _, upstream := range upstreamIDs {
+				_, upstreamEntry, err := state.ConfigEntry(ws, structs.ServiceDefaults, upstream.ID, &upstream.EnterpriseMeta)
 				if err != nil {
 					return err
 				}
@@ -289,16 +360,46 @@ func (c *ConfigEntry) ResolveServiceConfig(args *structs.ServiceConfigRequest, r
 					}
 				}
 
-				// Nothing to configure if a protocol hasn't been set.
-				if upstreamConf == nil || upstreamConf.Protocol == "" {
+				// No upstream found; skip.
+				if upstreamConf == nil {
 					continue
 				}
 
+				// Fallback to proxyConf global protocol.
+				protocol := proxyConfGlobalProtocol
+				if upstreamConf.Protocol != "" {
+					protocol = upstreamConf.Protocol
+				}
+
+				// Nothing to configure if a protocol hasn't been set.
+				if protocol == nil {
+					continue
+				}
+
+				usConfigs[upstream] = map[string]interface{}{
+					"protocol": protocol,
+				}
+			}
+
+			// don't allocate the slices just to not fill them
+			if len(usConfigs) == 0 {
+				return nil
+			}
+
+			if legacyUpstreams {
 				if reply.UpstreamConfigs == nil {
 					reply.UpstreamConfigs = make(map[string]map[string]interface{})
 				}
-				reply.UpstreamConfigs[upstream] = map[string]interface{}{
-					"protocol": upstreamConf.Protocol,
+				for us, conf := range usConfigs {
+					reply.UpstreamConfigs[us.ID] = conf
+				}
+			} else {
+				if reply.UpstreamIDConfigs == nil {
+					reply.UpstreamIDConfigs = make(structs.UpstreamConfigs, 0, len(usConfigs))
+				}
+
+				for us, conf := range usConfigs {
+					reply.UpstreamIDConfigs = append(reply.UpstreamIDConfigs, structs.UpstreamConfig{Upstream: us, Config: conf})
 				}
 			}
 

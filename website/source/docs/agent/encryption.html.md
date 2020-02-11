@@ -11,7 +11,10 @@ description: |-
 The Consul agent supports encrypting all of its network traffic. The exact
 method of encryption is described on the [encryption internals page](/docs/internals/security.html).
 There are two separate encryption systems, one for gossip traffic and one for RPC.
-If you are configuring encryption, review this [guide](https://learn.hashicorp.com/consul/security-networking/agent-encryption).
+
+To configure the encryption systems on a new cluster, review this following guides to
+[enable gossip encryption](https://learn.hashicorp.com/consul/security-networking/agent-encryption?utm_source=consul.io&utm_medium=docs) and 
+[TLS encryption for agent communication](https://learn.hashicorp.com/consul/security-networking/certificates?utm_source=consul.io&utm_medium=docs).
 
 ## Gossip Encryption
 
@@ -20,13 +23,13 @@ starting the Consul agent. The key can be set via the `encrypt` parameter.
 
 ~> **WAN Joined Datacenters Note:** If using multiple WAN joined datacenters, be sure to use _the same encryption key_ in all datacenters.
 
-The key must be 16-bytes, Base64 encoded. As a convenience, Consul provides the
+The key must be 32-bytes, Base64 encoded. As a convenience, Consul provides the
 [`consul keygen`](/docs/commands/keygen.html) command to generate a
 cryptographically suitable key:
 
 ```text
 $ consul keygen
-cg8StVXbQJ0gPvMd9o7yrg==
+pUqJrVyVRj5jsiYEkM/tFQYfWyJIv4s3XkvDwy7Cu5s=
 ```
 
 With that key, you can enable encryption on the agent. If encryption is enabled,
@@ -34,7 +37,7 @@ the output of [`consul agent`](/docs/commands/agent.html) will include "Encrypt:
 
 ```text
 $ cat encrypt.json
-{"encrypt": "cg8StVXbQJ0gPvMd9o7yrg=="}
+{"encrypt": "pUqJrVyVRj5jsiYEkM/tFQYfWyJIv4s3XkvDwy7Cu5s="}
 
 $ consul agent -data-dir=/tmp/consul -config-file=encrypt.json
 ==> WARNING: LAN keyring exists but -encrypt given, using keyring
@@ -101,7 +104,9 @@ and is secured using a symmetric key. See above for enabling gossip encryption.
 ## Configuring TLS on an existing cluster
 
 As of version 0.8.4, Consul supports migrating to TLS-encrypted traffic on a running cluster
-without downtime. This process assumes a starting point with no TLS settings configured, and involves
-an intermediate step in order to get to full TLS encryption. Review this step-by-step
-[guide](https://learn.hashicorp.com/consul/security-networking/certificates) to learn how. 
+without downtime. This process assumes a starting point with no TLS settings configured and involves
+an intermediate step in order to get to full TLS encryption. Review the
+[Securing RPC Communication with TLS Encryption guide](https://learn.hashicorp.com/consul/security-networking/certificates)
+for the step-by-step process to configure TLS on a new or existing cluster. Note the call outs there
+for existing cluster configuration. 
 
