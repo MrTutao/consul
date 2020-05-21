@@ -100,7 +100,7 @@ function is_set {
 
 function get_cert {
   local HOSTPORT=$1
-  CERT=$(openssl s_client -connect $HOSTPORT -showcerts )
+  CERT=$(openssl s_client -connect $HOSTPORT -showcerts </dev/null)
   openssl x509 -noout -text <<< "$CERT"
 }
 
@@ -118,6 +118,19 @@ function assert_proxy_presents_cert_uri {
   echo "$CERT"
 
   echo "$CERT" | grep -Eo "URI:spiffe://([a-zA-Z0-9-]+).consul/ns/${NS}/dc/${DC}/svc/$SERVICENAME"
+}
+
+function assert_dnssan_in_cert {
+  local HOSTPORT=$1
+  local DNSSAN=$2
+
+  CERT=$(retry_default get_cert $HOSTPORT)
+
+  echo "WANT DNSSAN: ${DNSSAN}"
+  echo "GOT CERT:"
+  echo "$CERT"
+
+  echo "$CERT" | grep -Eo "DNS:${DNSSAN}"
 }
 
 function assert_envoy_version {
@@ -146,15 +159,17 @@ function get_envoy_listener_filters {
   [ "$status" -eq 0 ]
   local ENVOY_VERSION=$(echo $output | jq --raw-output '.configs[0].bootstrap.node.metadata.envoy_version')
   local QUERY=''
-  if [ "$ENVOY_VERSION" == "1.13.0" ]; then
-    QUERY='.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
-  else
+  # from 1.13.0 on the config json looks slightly different
+  # 1.10.x, 1.11.x, 1.12.x are not affected
+  if [[ "$ENVOY_VERSION" =~ ^1\.1[012]\. ]]; then
     QUERY='.configs[2].dynamic_active_listeners[].listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
+  else
+    QUERY='.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
   fi
   echo "$output" | jq --raw-output "$QUERY"
 }
 
-function get_envoy_cluster_threshold {
+function get_envoy_cluster_config {
   local HOSTPORT=$1
   local CLUSTER_NAME=$2
   run retry_default curl -s -f $HOSTPORT/config_dump
@@ -162,7 +177,7 @@ function get_envoy_cluster_threshold {
   echo "$output" | jq --raw-output "
     .configs[1].dynamic_active_clusters[]
     | select(.cluster.name|startswith(\"${CLUSTER_NAME}\"))
-    | .cluster.circuit_breakers.thresholds[0]
+    | .cluster
   "
 }
 
@@ -179,11 +194,12 @@ function snapshot_envoy_admin {
   local HOSTPORT=$1
   local ENVOY_NAME=$2
   local DC=${3:-primary}
-
-
-  docker_wget "$DC" "http://${HOSTPORT}/config_dump" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-config_dump.json"
-  docker_wget "$DC" "http://${HOSTPORT}/clusters?format=json" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-clusters.json"
-  docker_wget "$DC" "http://${HOSTPORT}/stats" -q -O - > "./workdir/${DC}/envoy/${ENVOY_NAME}-stats.txt"
+  local OUTDIR="${LOG_DIR}/envoy-snapshots/${DC}/${ENVOY_NAME}"
+  
+  mkdir -p "${OUTDIR}"
+  docker_wget "$DC" "http://${HOSTPORT}/config_dump" -q -O - > "${OUTDIR}/config_dump.json"
+  docker_wget "$DC" "http://${HOSTPORT}/clusters?format=json" -q -O - > "${OUTDIR}/clusters.json"
+  docker_wget "$DC" "http://${HOSTPORT}/stats" -q -O - > "${OUTDIR}/stats.txt"
 }
 
 function reset_envoy_metrics {
@@ -337,6 +353,27 @@ function get_healthy_service_count {
   echo "$output" | jq --raw-output '. | length'
 }
 
+function assert_alive_wan_member_count {
+  local EXPECT_COUNT=$1
+  run retry_long assert_alive_wan_member_count_once $EXPECT_COUNT
+  [ "$status" -eq 0 ]
+}
+
+function assert_alive_wan_member_count_once {
+  local EXPECT_COUNT=$1
+
+  GOT_COUNT=$(get_alive_wan_member_count)
+
+  [ "$GOT_COUNT" -eq "$EXPECT_COUNT" ]
+}
+
+function get_alive_wan_member_count {
+  run retry_default curl -sL -f "127.0.0.1:8500/v1/agent/members?wan=1"
+  [ "$status" -eq 0 ]
+  # echo "$output" >&3
+  echo "$output" | jq '.[] | select(.Status == 1) | .Name' | wc -l
+}
+
 function assert_service_has_healthy_instances_once {
   local SERVICE_NAME=$1
   local EXPECT_COUNT=$2
@@ -394,7 +431,7 @@ function docker_wget {
 function docker_curl {
   local DC=$1
   shift 1
-  docker run -ti --rm --network container:envoy_consul-${DC}_1 --entrypoint curl consul-dev "$@"
+  docker run --rm --network container:envoy_consul-${DC}_1 --entrypoint curl consul-dev "$@"
 }
 
 function docker_exec {
@@ -504,11 +541,11 @@ function gen_envoy_bootstrap {
   SERVICE=$1
   ADMIN_PORT=$2
   DC=${3:-primary}
-  IS_MGW=${4:-0}
+  IS_GW=${4:-0}
   EXTRA_ENVOY_BS_ARGS="${5-}"
 
   PROXY_ID="$SERVICE"
-  if ! is_set "$IS_MGW"
+  if ! is_set "$IS_GW"
   then
     PROXY_ID="$SERVICE-sidecar-proxy"
   fi
@@ -595,6 +632,10 @@ function update_intention {
   return $?
 }
 
+function get_ca_root {
+  curl -s -f "http://localhost:8500/v1/connect/ca/roots" | jq -r ".Roots[0].RootCert"
+}
+
 function wait_for_agent_service_register {
   local SERVICE_ID=$1
   local DC=${2:-primary}
@@ -622,15 +663,21 @@ function set_ttl_check_state {
 }
 
 function get_upstream_fortio_name {
-  run retry_default curl -v -s -f localhost:5000/debug?env=dump
+  local HOST=$1
+  local PORT=$2
+  local PREFIX=$3
+  run retry_default curl -v -s -f -H"Host: ${HOST}" "localhost:${PORT}${PREFIX}/debug?env=dump"
   [ "$status" == 0 ]
   echo "$output" | grep -E "^FORTIO_NAME="
 }
 
 function assert_expected_fortio_name {
   local EXPECT_NAME=$1
+  local HOST=${2:-"localhost"}
+  local PORT=${3:-5000}
+  local URL_PREFIX=${4:-""}
 
-  GOT=$(get_upstream_fortio_name)
+  GOT=$(get_upstream_fortio_name ${HOST} ${PORT} ${URL_PREFIX})
 
   if [ "$GOT" != "FORTIO_NAME=${EXPECT_NAME}" ]; then
     echo "expected name: $EXPECT_NAME, actual name: $GOT" 1>&2

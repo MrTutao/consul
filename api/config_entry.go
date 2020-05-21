@@ -12,11 +12,13 @@ import (
 )
 
 const (
-	ServiceDefaults string = "service-defaults"
-	ProxyDefaults   string = "proxy-defaults"
-	ServiceRouter   string = "service-router"
-	ServiceSplitter string = "service-splitter"
-	ServiceResolver string = "service-resolver"
+	ServiceDefaults    string = "service-defaults"
+	ProxyDefaults      string = "proxy-defaults"
+	ServiceRouter      string = "service-router"
+	ServiceSplitter    string = "service-splitter"
+	ServiceResolver    string = "service-resolver"
+	IngressGateway     string = "ingress-gateway"
+	TerminatingGateway string = "terminating-gateway"
 
 	ProxyConfigGlobal string = "global"
 )
@@ -140,11 +142,6 @@ func (p *ProxyConfigEntry) GetModifyIndex() uint64 {
 	return p.ModifyIndex
 }
 
-type rawEntryListResponse struct {
-	kind    string
-	Entries []map[string]interface{}
-}
-
 func makeConfigEntry(kind, name string) (ConfigEntry, error) {
 	switch kind {
 	case ServiceDefaults:
@@ -157,6 +154,10 @@ func makeConfigEntry(kind, name string) (ConfigEntry, error) {
 		return &ServiceSplitterConfigEntry{Kind: kind, Name: name}, nil
 	case ServiceResolver:
 		return &ServiceResolverConfigEntry{Kind: kind, Name: name}, nil
+	case IngressGateway:
+		return &IngressGatewayConfigEntry{Kind: kind, Name: name}, nil
+	case TerminatingGateway:
+		return &TerminatingGatewayConfigEntry{Kind: kind, Name: name}, nil
 	default:
 		return nil, fmt.Errorf("invalid config entry kind: %s", kind)
 	}

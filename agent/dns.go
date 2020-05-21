@@ -77,6 +77,17 @@ type dnsConfig struct {
 	enterpriseDNSConfig
 }
 
+type serviceLookup struct {
+	Network           string
+	Datacenter        string
+	Service           string
+	Tag               string
+	MaxRecursionLevel int
+	Connect           bool
+	Ingress           bool
+	structs.EnterpriseMeta
+}
+
 // DNSServer is used to wrap an Agent and expose various
 // service discovery endpoints using a DNS interface.
 type DNSServer struct {
@@ -190,7 +201,13 @@ func (d *DNSServer) ListenAndServe(network, addr string, notif func()) error {
 	d.mux = dns.NewServeMux()
 	d.mux.HandleFunc("arpa.", d.handlePtr)
 	d.mux.HandleFunc(d.domain, d.handleQuery)
-	if d.altDomain != "" {
+	// this is not an empty string check because NewDNSServer will have
+	// converted the configured alt domain into an FQDN which will ensure that
+	// the value ends with a ".". Therefore "." is the empty string equivalent
+	// for originally having no alternate domain set. If there is a reason
+	// why consul should be configured to handle the root zone I have yet
+	// to think of it.
+	if d.altDomain != "." {
 		d.mux.HandleFunc(d.altDomain, d.handleQuery)
 	}
 	d.toggleRecursorHandlerFromConfig(cfg)
@@ -274,9 +291,16 @@ func recursorAddr(recursor string) (string, error) {
 	// Add the port if none
 START:
 	_, _, err := net.SplitHostPort(recursor)
-	if ae, ok := err.(*net.AddrError); ok && ae.Err == "missing port in address" {
-		recursor = ipaddr.FormatAddressPort(recursor, 53)
-		goto START
+	if ae, ok := err.(*net.AddrError); ok {
+		if ae.Err == "missing port in address" {
+			recursor = ipaddr.FormatAddressPort(recursor, 53)
+			goto START
+		} else if ae.Err == "too many colons in address" {
+			if ip := net.ParseIP(recursor); ip != nil && ip.To4() == nil {
+				recursor = ipaddr.FormatAddressPort(recursor, 53)
+				goto START
+			}
+		}
 	}
 	if err != nil {
 		return "", err
@@ -433,14 +457,14 @@ func (d *DNSServer) handleQuery(resp dns.ResponseWriter, req *dns.Msg) {
 
 	switch req.Question[0].Qtype {
 	case dns.TypeSOA:
-		ns, glue := d.nameservers(cfg, req.IsEdns0() != nil, maxRecursionLevelDefault, req)
+		ns, glue := d.nameservers(cfg, maxRecursionLevelDefault)
 		m.Answer = append(m.Answer, d.soa(cfg))
 		m.Ns = append(m.Ns, ns...)
 		m.Extra = append(m.Extra, glue...)
 		m.SetRcode(req, dns.RcodeSuccess)
 
 	case dns.TypeNS:
-		ns, glue := d.nameservers(cfg, req.IsEdns0() != nil, maxRecursionLevelDefault, req)
+		ns, glue := d.nameservers(cfg, maxRecursionLevelDefault)
 		m.Answer = ns
 		m.Extra = glue
 		m.SetRcode(req, dns.RcodeSuccess)
@@ -487,8 +511,14 @@ func (d *DNSServer) addSOA(cfg *dnsConfig, msg *dns.Msg) {
 // nameservers returns the names and ip addresses of up to three random servers
 // in the current cluster which serve as authoritative name servers for zone.
 
-func (d *DNSServer) nameservers(cfg *dnsConfig, edns bool, maxRecursionLevel int, req *dns.Msg) (ns []dns.RR, extra []dns.RR) {
-	out, err := d.lookupServiceNodes(cfg, d.agent.config.Datacenter, structs.ConsulServiceName, "", structs.DefaultEnterpriseMeta(), false, maxRecursionLevel)
+func (d *DNSServer) nameservers(cfg *dnsConfig, maxRecursionLevel int) (ns []dns.RR, extra []dns.RR) {
+	out, err := d.lookupServiceNodes(cfg, serviceLookup{
+		Datacenter:     d.agent.config.Datacenter,
+		Service:        structs.ConsulServiceName,
+		Connect:        false,
+		Ingress:        false,
+		EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
+	})
 	if err != nil {
 		d.logger.Warn("Unable to get list of servers", "error", err)
 		return nil, nil
@@ -525,7 +555,7 @@ func (d *DNSServer) nameservers(cfg *dnsConfig, edns bool, maxRecursionLevel int
 		}
 		ns = append(ns, nsrr)
 
-		extra = append(extra, d.makeRecordFromNode(dc, o.Node, dns.TypeANY, fqdn, cfg.NodeTTL, maxRecursionLevel)...)
+		extra = append(extra, d.makeRecordFromNode(o.Node, dns.TypeANY, fqdn, cfg.NodeTTL, maxRecursionLevel)...)
 
 		// don't provide more than 3 servers
 		if len(ns) >= 3 {
@@ -585,7 +615,7 @@ func (d *DNSServer) doDispatch(network string, remoteAddr net.Addr, req, resp *d
 	done := false
 	for i := len(labels) - 1; i >= 0 && !done; i-- {
 		switch labels[i] {
-		case "service", "connect", "node", "query", "addr":
+		case "service", "connect", "ingress", "node", "query", "addr":
 			queryParts = labels[:i]
 			querySuffixes = labels[i+1:]
 			queryKind = labels[i]
@@ -617,6 +647,14 @@ func (d *DNSServer) doDispatch(network string, remoteAddr net.Addr, req, resp *d
 			goto INVALID
 		}
 
+		lookup := serviceLookup{
+			Network:           network,
+			Datacenter:        datacenter,
+			Connect:           false,
+			Ingress:           false,
+			MaxRecursionLevel: maxRecursionLevel,
+			EnterpriseMeta:    entMeta,
+		}
 		// Support RFC 2782 style syntax
 		if n == 2 && strings.HasPrefix(queryParts[1], "_") && strings.HasPrefix(queryParts[0], "_") {
 
@@ -628,8 +666,10 @@ func (d *DNSServer) doDispatch(network string, remoteAddr net.Addr, req, resp *d
 				tag = ""
 			}
 
+			lookup.Tag = tag
+			lookup.Service = queryParts[0][1:]
 			// _name._tag.service.consul
-			d.serviceLookup(cfg, network, datacenter, queryParts[0][1:], tag, &entMeta, false, req, resp, maxRecursionLevel)
+			d.serviceLookup(cfg, lookup, req, resp)
 
 			// Consul 0.3 and prior format for SRV queries
 		} else {
@@ -640,8 +680,11 @@ func (d *DNSServer) doDispatch(network string, remoteAddr net.Addr, req, resp *d
 				tag = strings.Join(queryParts[:n-1], ".")
 			}
 
+			lookup.Tag = tag
+			lookup.Service = queryParts[n-1]
+
 			// tag[.tag].name.service.consul
-			d.serviceLookup(cfg, network, datacenter, queryParts[n-1], tag, &entMeta, false, req, resp, maxRecursionLevel)
+			d.serviceLookup(cfg, lookup, req, resp)
 		}
 	case "connect":
 		if len(queryParts) < 1 {
@@ -652,8 +695,37 @@ func (d *DNSServer) doDispatch(network string, remoteAddr net.Addr, req, resp *d
 			goto INVALID
 		}
 
+		lookup := serviceLookup{
+			Network:           network,
+			Datacenter:        datacenter,
+			Service:           queryParts[len(queryParts)-1],
+			Connect:           true,
+			Ingress:           false,
+			MaxRecursionLevel: maxRecursionLevel,
+			EnterpriseMeta:    entMeta,
+		}
 		// name.connect.consul
-		d.serviceLookup(cfg, network, datacenter, queryParts[len(queryParts)-1], "", &entMeta, true, req, resp, maxRecursionLevel)
+		d.serviceLookup(cfg, lookup, req, resp)
+	case "ingress":
+		if len(queryParts) < 1 {
+			goto INVALID
+		}
+
+		if !d.parseDatacenterAndEnterpriseMeta(querySuffixes, cfg, &datacenter, &entMeta) {
+			goto INVALID
+		}
+
+		lookup := serviceLookup{
+			Network:           network,
+			Datacenter:        datacenter,
+			Service:           queryParts[len(queryParts)-1],
+			Connect:           false,
+			Ingress:           true,
+			MaxRecursionLevel: maxRecursionLevel,
+			EnterpriseMeta:    entMeta,
+		}
+		// name.ingress.consul
+		d.serviceLookup(cfg, lookup, req, resp)
 	case "node":
 		if len(queryParts) < 1 {
 			goto INVALID
@@ -788,7 +860,7 @@ func (d *DNSServer) nodeLookup(cfg *dnsConfig, network, datacenter, node string,
 	q := req.Question[0]
 	// Only compute A and CNAME record if query is not TXT type
 	if qType != dns.TypeTXT {
-		records := d.makeRecordFromNode(n.Datacenter, n, q.Qtype, q.Name, cfg.NodeTTL, maxRecursionLevel)
+		records := d.makeRecordFromNode(n, q.Qtype, q.Name, cfg.NodeTTL, maxRecursionLevel)
 		resp.Answer = append(resp.Answer, records...)
 	}
 
@@ -1063,22 +1135,20 @@ func (d *DNSServer) trimDNSResponse(cfg *dnsConfig, network string, req, resp *d
 }
 
 // lookupServiceNodes returns nodes with a given service.
-func (d *DNSServer) lookupServiceNodes(cfg *dnsConfig, datacenter, service, tag string, entMeta *structs.EnterpriseMeta, connect bool, maxRecursionLevel int) (structs.IndexedCheckServiceNodes, error) {
+func (d *DNSServer) lookupServiceNodes(cfg *dnsConfig, lookup serviceLookup) (structs.IndexedCheckServiceNodes, error) {
 	args := structs.ServiceSpecificRequest{
-		Connect:     connect,
-		Datacenter:  datacenter,
-		ServiceName: service,
-		ServiceTags: []string{tag},
-		TagFilter:   tag != "",
+		Connect:     lookup.Connect,
+		Ingress:     lookup.Ingress,
+		Datacenter:  lookup.Datacenter,
+		ServiceName: lookup.Service,
+		ServiceTags: []string{lookup.Tag},
+		TagFilter:   lookup.Tag != "",
 		QueryOptions: structs.QueryOptions{
 			Token:      d.agent.tokens.UserToken(),
 			AllowStale: cfg.AllowStale,
 			MaxAge:     cfg.CacheMaxAge,
 		},
-	}
-
-	if entMeta != nil {
-		args.EnterpriseMeta = *entMeta
+		EnterpriseMeta: lookup.EnterpriseMeta,
 	}
 
 	var out structs.IndexedCheckServiceNodes
@@ -1095,7 +1165,7 @@ func (d *DNSServer) lookupServiceNodes(cfg *dnsConfig, datacenter, service, tag 
 		}
 		d.logger.Trace("cache results for service",
 			"cache_hit", m.Hit,
-			"service", service,
+			"service", lookup.Service,
 		)
 
 		out = *reply
@@ -1128,8 +1198,8 @@ func (d *DNSServer) lookupServiceNodes(cfg *dnsConfig, datacenter, service, tag 
 }
 
 // serviceLookup is used to handle a service query
-func (d *DNSServer) serviceLookup(cfg *dnsConfig, network, datacenter, service, tag string, entMeta *structs.EnterpriseMeta, connect bool, req, resp *dns.Msg, maxRecursionLevel int) {
-	out, err := d.lookupServiceNodes(cfg, datacenter, service, tag, entMeta, connect, maxRecursionLevel)
+func (d *DNSServer) serviceLookup(cfg *dnsConfig, lookup serviceLookup, req, resp *dns.Msg) {
+	out, err := d.lookupServiceNodes(cfg, lookup)
 	if err != nil {
 		d.logger.Error("rpc error", "error", err)
 		resp.SetRcode(req, dns.RcodeServerFailure)
@@ -1147,17 +1217,17 @@ func (d *DNSServer) serviceLookup(cfg *dnsConfig, network, datacenter, service, 
 	out.Nodes.Shuffle()
 
 	// Determine the TTL
-	ttl, _ := cfg.GetTTLForService(service)
+	ttl, _ := cfg.GetTTLForService(lookup.Service)
 
 	// Add various responses depending on the request
 	qType := req.Question[0].Qtype
 	if qType == dns.TypeSRV {
-		d.serviceSRVRecords(cfg, datacenter, out.Nodes, req, resp, ttl, maxRecursionLevel)
+		d.serviceSRVRecords(cfg, lookup.Datacenter, out.Nodes, req, resp, ttl, lookup.MaxRecursionLevel)
 	} else {
-		d.serviceNodeRecords(cfg, datacenter, out.Nodes, req, resp, ttl, maxRecursionLevel)
+		d.serviceNodeRecords(cfg, lookup.Datacenter, out.Nodes, req, resp, ttl, lookup.MaxRecursionLevel)
 	}
 
-	d.trimDNSResponse(cfg, network, req, resp)
+	d.trimDNSResponse(cfg, lookup.Network, req, resp)
 
 	// If the answer is empty and the response isn't truncated, return not found
 	if len(resp.Answer) == 0 && !resp.Truncated {
@@ -1461,7 +1531,7 @@ func makeARecord(qType uint16, ip net.IP, ttl time.Duration) dns.RR {
 // Craft dns records for a node
 // In case of an SRV query the answer will be a IN SRV and additional data will store an IN A to the node IP
 // Otherwise it will return a IN A record
-func (d *DNSServer) makeRecordFromNode(dc string, node *structs.Node, qType uint16, qName string, ttl time.Duration, maxRecursionLevel int) []dns.RR {
+func (d *DNSServer) makeRecordFromNode(node *structs.Node, qType uint16, qName string, ttl time.Duration, maxRecursionLevel int) []dns.RR {
 	addrTranslate := TranslateAddressAcceptDomain
 	if qType == dns.TypeA {
 		addrTranslate |= TranslateAddressAcceptIPv4
@@ -1681,7 +1751,7 @@ func (d *DNSServer) nodeServiceRecords(dc string, node structs.CheckServiceNode,
 }
 
 func (d *DNSServer) generateMeta(dc string, qName string, node *structs.Node, ttl time.Duration) []dns.RR {
-	var extra []dns.RR
+	extra := make([]dns.RR, 0, len(node.Meta))
 	for key, value := range node.Meta {
 		txt := value
 		if !strings.HasPrefix(strings.ToLower(key), "rfc1035-") {

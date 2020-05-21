@@ -1,17 +1,22 @@
 package authmethodcreate
 
 import (
+	"encoding/json"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/consul/agent"
 	"github.com/hashicorp/consul/agent/connect"
+	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/command/acl"
 	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/testrpc"
+	"github.com/hashicorp/go-uuid"
 	"github.com/mitchellh/cli"
 	"github.com/stretchr/testify/require"
 
@@ -33,7 +38,7 @@ func TestAuthMethodCreateCommand(t *testing.T) {
 	testDir := testutil.TempDir(t, "acl")
 	defer os.RemoveAll(testDir)
 
-	a := agent.NewTestAgent(t, t.Name(), `
+	a := agent.NewTestAgent(t, `
 	primary_datacenter = "dc1"
 	acl {
 		enabled = true
@@ -44,6 +49,7 @@ func TestAuthMethodCreateCommand(t *testing.T) {
 
 	defer a.Shutdown()
 	testrpc.WaitForLeader(t, a.RPC, "dc1")
+	client := a.Client()
 
 	t.Run("type required", func(t *testing.T) {
 		args := []string{
@@ -91,11 +97,14 @@ func TestAuthMethodCreateCommand(t *testing.T) {
 	})
 
 	t.Run("create testing", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=testing",
-			"-name=test",
+			"-name", name,
+			"-description=desc",
+			"-display-name=display",
 		}
 
 		ui := cli.NewMockUi()
@@ -104,16 +113,55 @@ func TestAuthMethodCreateCommand(t *testing.T) {
 		code := cmd.Run(args)
 		require.Equal(t, code, 0)
 		require.Empty(t, ui.ErrorWriter.String())
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name:        name,
+			Type:        "testing",
+			DisplayName: "display",
+			Description: "desc",
+		}
+		require.Equal(t, expect, got)
+	})
+
+	t.Run("create testing with max token ttl", func(t *testing.T) {
+		name := getTestName(t)
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-description=desc",
+			"-display-name=display",
+			"-max-token-ttl=5m",
+		}
+
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+
+		code := cmd.Run(args)
+		require.Equal(t, code, 0, "err: "+ui.ErrorWriter.String())
+		require.Empty(t, ui.ErrorWriter.String())
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name:        name,
+			Type:        "testing",
+			DisplayName: "display",
+			Description: "desc",
+			MaxTokenTTL: 5 * time.Minute,
+		}
+		require.Equal(t, expect, got)
 	})
 }
 
-func TestAuthMethodCreateCommand_k8s(t *testing.T) {
+func TestAuthMethodCreateCommand_JSON(t *testing.T) {
 	t.Parallel()
 
 	testDir := testutil.TempDir(t, "acl")
 	defer os.RemoveAll(testDir)
 
-	a := agent.NewTestAgent(t, t.Name(), `
+	a := agent.NewTestAgent(t, `
 	primary_datacenter = "dc1"
 	acl {
 		enabled = true
@@ -124,13 +172,134 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 
 	defer a.Shutdown()
 	testrpc.WaitForLeader(t, a.RPC, "dc1")
+	client := a.Client()
+
+	t.Run("type required", func(t *testing.T) {
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-format=json",
+		}
+
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+
+		code := cmd.Run(args)
+		require.Equal(t, code, 1)
+		require.Contains(t, ui.ErrorWriter.String(), "Missing required '-type' flag")
+	})
+
+	t.Run("create testing", func(t *testing.T) {
+		name := getTestName(t)
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-description=desc",
+			"-display-name=display",
+			"-format=json",
+		}
+
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+
+		code := cmd.Run(args)
+		out := ui.OutputWriter.String()
+
+		require.Equal(t, code, 0)
+		require.Empty(t, ui.ErrorWriter.String())
+		require.Contains(t, out, name)
+
+		var jsonOutput json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(out), &jsonOutput))
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name:        name,
+			Type:        "testing",
+			DisplayName: "display",
+			Description: "desc",
+		}
+		require.Equal(t, expect, got)
+	})
+
+	t.Run("create testing with max token ttl", func(t *testing.T) {
+		name := getTestName(t)
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-description=desc",
+			"-display-name=display",
+			"-max-token-ttl=5m",
+			"-format=json",
+		}
+
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+
+		code := cmd.Run(args)
+		out := ui.OutputWriter.String()
+
+		require.Equal(t, code, 0)
+		require.Empty(t, ui.ErrorWriter.String())
+		require.Contains(t, out, name)
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name:        name,
+			Type:        "testing",
+			DisplayName: "display",
+			Description: "desc",
+			MaxTokenTTL: 5 * time.Minute,
+		}
+		require.Equal(t, expect, got)
+
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(out), &raw))
+		delete(raw, "CreateIndex")
+		delete(raw, "ModifyIndex")
+		delete(raw, "Namespace")
+
+		require.Equal(t, map[string]interface{}{
+			"Name":        name,
+			"Type":        "testing",
+			"DisplayName": "display",
+			"Description": "desc",
+			"MaxTokenTTL": "5m0s",
+			"Config":      nil,
+		}, raw)
+	})
+}
+
+func TestAuthMethodCreateCommand_k8s(t *testing.T) {
+	t.Parallel()
+
+	testDir := testutil.TempDir(t, "acl")
+	defer os.RemoveAll(testDir)
+
+	a := agent.NewTestAgent(t, `
+	primary_datacenter = "dc1"
+	acl {
+		enabled = true
+		tokens {
+			master = "root"
+		}
+	}`)
+
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+	client := a.Client()
 
 	t.Run("k8s host required", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=kubernetes",
-			"-name=k8s",
+			"-name", name,
 		}
 
 		ui := cli.NewMockUi()
@@ -142,11 +311,12 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 	})
 
 	t.Run("k8s ca cert required", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=kubernetes",
-			"-name=k8s",
+			"-name", name,
 			"-kubernetes-host=https://foo.internal:8443",
 		}
 
@@ -161,11 +331,12 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 	ca := connect.TestCA(t, nil)
 
 	t.Run("k8s jwt required", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=kubernetes",
-			"-name=k8s",
+			"-name", name,
 			"-kubernetes-host=https://foo.internal:8443",
 			"-kubernetes-ca-cert", ca.RootCert,
 		}
@@ -179,11 +350,12 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 	})
 
 	t.Run("create k8s", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=kubernetes",
-			"-name=k8s",
+			"-name", name,
 			"-kubernetes-host", "https://foo.internal:8443",
 			"-kubernetes-ca-cert", ca.RootCert,
 			"-kubernetes-service-account-jwt", acl.TestKubernetesJWT_A,
@@ -193,19 +365,32 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 		cmd := New(ui)
 
 		code := cmd.Run(args)
-		require.Equal(t, code, 0)
+		require.Equal(t, 0, code)
 		require.Empty(t, ui.ErrorWriter.String())
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name: name,
+			Type: "kubernetes",
+			Config: map[string]interface{}{
+				"Host":              "https://foo.internal:8443",
+				"CACert":            ca.RootCert,
+				"ServiceAccountJWT": acl.TestKubernetesJWT_A,
+			},
+		}
+		require.Equal(t, expect, got)
 	})
 
 	caFile := filepath.Join(testDir, "ca.crt")
 	require.NoError(t, ioutil.WriteFile(caFile, []byte(ca.RootCert), 0600))
 
 	t.Run("create k8s with cert file", func(t *testing.T) {
+		name := getTestName(t)
 		args := []string{
 			"-http-addr=" + a.HTTPAddr(),
 			"-token=root",
 			"-type=kubernetes",
-			"-name=k8s",
+			"-name", name,
 			"-kubernetes-host", "https://foo.internal:8443",
 			"-kubernetes-ca-cert", "@" + caFile,
 			"-kubernetes-service-account-jwt", acl.TestKubernetesJWT_A,
@@ -217,5 +402,140 @@ func TestAuthMethodCreateCommand_k8s(t *testing.T) {
 		code := cmd.Run(args)
 		require.Equal(t, code, 0)
 		require.Empty(t, ui.ErrorWriter.String())
+
+		got := getTestMethod(t, client, name)
+		expect := &api.ACLAuthMethod{
+			Name: name,
+			Type: "kubernetes",
+			Config: map[string]interface{}{
+				"Host":              "https://foo.internal:8443",
+				"CACert":            ca.RootCert,
+				"ServiceAccountJWT": acl.TestKubernetesJWT_A,
+			},
+		}
+		require.Equal(t, expect, got)
 	})
+}
+
+func TestAuthMethodCreateCommand_config(t *testing.T) {
+	t.Parallel()
+
+	testDir := testutil.TempDir(t, "auth-method")
+	defer os.RemoveAll(testDir)
+
+	a := agent.NewTestAgent(t, `
+	primary_datacenter = "dc1"
+	acl {
+		enabled = true
+		tokens {
+			master = "root"
+		}
+	}`)
+
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+	client := a.Client()
+
+	checkMethod := func(t *testing.T, methodName string) {
+
+		method, _, err := client.ACL().AuthMethodRead(
+			methodName,
+			&api.QueryOptions{Token: "root"},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, method)
+		require.Equal(t, "foo", method.Config["SessionID"])
+	}
+
+	t.Run("config file", func(t *testing.T) {
+		name := getTestName(t)
+		configFile := filepath.Join(testDir, "config.json")
+		jsonConfig := `{"SessionID":"foo"}`
+		require.NoError(t, ioutil.WriteFile(configFile, []byte(jsonConfig), 0644))
+
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-config=@" + configFile,
+		}
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+		code := cmd.Run(args)
+		require.Equal(t, 0, code)
+		require.Empty(t, ui.ErrorWriter.String())
+		checkMethod(t, name)
+	})
+
+	t.Run("config std-in", func(t *testing.T) {
+		name := getTestName(t)
+		stdinR, stdinW := io.Pipe()
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+		cmd.testStdin = stdinR
+		go func() {
+			stdinW.Write([]byte(`{"SessionID":"foo"}`))
+			stdinW.Close()
+		}()
+
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-config=-",
+		}
+		code := cmd.Run(args)
+		require.Equal(t, 0, code)
+		require.Empty(t, ui.ErrorWriter.String())
+		checkMethod(t, name)
+
+	})
+	t.Run("config string", func(t *testing.T) {
+		name := getTestName(t)
+		ui := cli.NewMockUi()
+		cmd := New(ui)
+		args := []string{
+			"-http-addr=" + a.HTTPAddr(),
+			"-token=root",
+			"-type=testing",
+			"-name", name,
+			"-config=" + `{"SessionID":"foo"}`,
+		}
+		code := cmd.Run(args)
+		require.Equal(t, 0, code)
+		require.Empty(t, ui.ErrorWriter.String())
+		checkMethod(t, name)
+	})
+}
+
+func getTestMethod(t *testing.T, client *api.Client, methodName string) *api.ACLAuthMethod {
+	t.Helper()
+
+	method, _, err := client.ACL().AuthMethodRead(
+		methodName,
+		&api.QueryOptions{Token: "root"},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, method)
+
+	// zero these out since we don't really care
+	method.CreateIndex = 0
+	method.ModifyIndex = 0
+
+	if method.Namespace == "default" {
+		method.Namespace = ""
+	}
+
+	return method
+}
+
+func getTestName(t *testing.T) string {
+	t.Helper()
+
+	id, err := uuid.GenerateUUID()
+	require.NoError(t, err)
+	return "test-" + id
+
 }

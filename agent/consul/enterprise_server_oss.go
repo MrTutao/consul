@@ -35,6 +35,10 @@ func (s *Server) handleEnterpriseRPCConn(rtype pool.RPCType, conn net.Conn, isTL
 	return false
 }
 
+func (s *Server) handleEnterpriseNativeTLSConn(alpnProto string, conn net.Conn) bool {
+	return false
+}
+
 func (s *Server) handleEnterpriseLeave() {
 	return
 }
@@ -56,5 +60,11 @@ func (s *Server) validateEnterpriseRequest(entMeta *structs.EnterpriseMeta, writ
 }
 
 func (_ *Server) addEnterpriseSerfTags(_ map[string]string) {
+	// do nothing
+}
+
+// updateEnterpriseSerfTags in enterprise will update any instances of Serf with the tag that
+// are not the normal LAN or WAN serf instances (network segments and network areas)
+func (_ *Server) updateEnterpriseSerfTags(_, _ string) {
 	// do nothing
 }

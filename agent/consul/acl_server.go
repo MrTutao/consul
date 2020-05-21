@@ -84,18 +84,22 @@ func (s *Server) checkBindingRuleUUID(id string) (bool, error) {
 	return !structs.ACLIDReserved(id), nil
 }
 
+func (s *Server) updateSerfTags(key, value string) {
+	// Update the LAN serf
+	lib.UpdateSerfTag(s.serfLAN, key, value)
+
+	if s.serfWAN != nil {
+		lib.UpdateSerfTag(s.serfWAN, key, value)
+	}
+
+	s.updateEnterpriseSerfTags(key, value)
+}
+
 func (s *Server) updateACLAdvertisement() {
 	// One thing to note is that once in new ACL mode the server will
 	// never transition to legacy ACL mode. This is not currently a
 	// supported use case.
-
-	// always advertise to all the LAN Members
-	lib.UpdateSerfTag(s.serfLAN, "acls", string(structs.ACLModeEnabled))
-
-	if s.serfWAN != nil {
-		// advertise on the WAN only when we are inside the ACL datacenter
-		lib.UpdateSerfTag(s.serfWAN, "acls", string(structs.ACLModeEnabled))
-	}
+	s.updateSerfTags("acls", string(structs.ACLModeEnabled))
 }
 
 func (s *Server) canUpgradeToNewACLs(isLeader bool) bool {
@@ -105,23 +109,26 @@ func (s *Server) canUpgradeToNewACLs(isLeader bool) bool {
 	}
 
 	if !s.InACLDatacenter() {
-		numServers, mode, _ := ServersGetACLMode(s.WANMembers(), "", s.config.ACLDatacenter)
-		if mode != structs.ACLModeEnabled || numServers == 0 {
+		foundServers, mode, _ := ServersGetACLMode(s, "", s.config.ACLDatacenter)
+		if mode != structs.ACLModeEnabled || !foundServers {
+			s.logger.Debug("Cannot upgrade to new ACLs, servers in acl datacenter are not yet upgraded", "ACLDatacenter", s.config.ACLDatacenter, "mode", mode, "found", foundServers)
 			return false
 		}
 	}
 
+	leaderAddr := string(s.raft.Leader())
+	foundServers, mode, leaderMode := ServersGetACLMode(s, leaderAddr, s.config.Datacenter)
 	if isLeader {
-		if _, mode, _ := ServersGetACLMode(s.LANMembers(), "", ""); mode == structs.ACLModeLegacy {
+		if mode == structs.ACLModeLegacy {
 			return true
 		}
 	} else {
-		leader := string(s.raft.Leader())
-		if _, _, leaderMode := ServersGetACLMode(s.LANMembers(), leader, ""); leaderMode == structs.ACLModeEnabled {
+		if leaderMode == structs.ACLModeEnabled {
 			return true
 		}
 	}
 
+	s.logger.Debug("Cannot upgrade to new ACLs", "leaderMode", leaderMode, "mode", mode, "found", foundServers, "leader", leaderAddr)
 	return false
 }
 
@@ -215,6 +222,13 @@ func (s *Server) ResolveToken(token string) (acl.Authorizer, error) {
 	return authz, err
 }
 
+func (s *Server) ResolveTokenToIdentity(token string) (structs.ACLIdentity, error) {
+	// not using ResolveTokenToIdentityAndAuthorizer because in this case we don't
+	// need to resolve the roles, policies and namespace but just want the identity
+	// information such as accessor id.
+	return s.acls.ResolveTokenToIdentity(token)
+}
+
 func (s *Server) ResolveTokenToIdentityAndAuthorizer(token string) (structs.ACLIdentity, acl.Authorizer, error) {
 	if id, authz := s.ResolveEntTokenToIdentityAndAuthorizer(token); id != nil && authz != nil {
 		return id, authz, nil
@@ -225,7 +239,7 @@ func (s *Server) ResolveTokenToIdentityAndAuthorizer(token string) (structs.ACLI
 // ResolveTokenIdentityAndDefaultMeta retrieves an identity and authorizer for the caller,
 // and populates the EnterpriseMeta based on the AuthorizerContext.
 func (s *Server) ResolveTokenIdentityAndDefaultMeta(token string, entMeta *structs.EnterpriseMeta, authzContext *acl.AuthorizerContext) (structs.ACLIdentity, acl.Authorizer, error) {
-	identity, authz, err := s.acls.ResolveTokenToIdentityAndAuthorizer(token)
+	identity, authz, err := s.ResolveTokenToIdentityAndAuthorizer(token)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -251,6 +265,9 @@ func (s *Server) ResolveTokenAndDefaultMeta(token string, entMeta *structs.Enter
 }
 
 func (s *Server) filterACL(token string, subj interface{}) error {
+	if id, authz := s.ResolveEntTokenToIdentityAndAuthorizer(token); id != nil && authz != nil {
+		return s.acls.filterACLWithAuthorizer(authz, subj)
+	}
 	return s.acls.filterACL(token, subj)
 }
 

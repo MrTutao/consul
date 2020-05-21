@@ -11,8 +11,10 @@ import (
 
 	"github.com/hashicorp/consul/acl"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
+	"github.com/mitchellh/copystructure"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -460,6 +462,14 @@ type ACLResolverTestDelegate struct {
 	policyResolveFn func(*structs.ACLPolicyBatchGetRequest, *structs.ACLPolicyBatchResponse) error
 	roleResolveFn   func(*structs.ACLRoleBatchGetRequest, *structs.ACLRoleBatchResponse) error
 
+	localTokenResolutions   int32
+	remoteTokenResolutions  int32
+	localPolicyResolutions  int32
+	remotePolicyResolutions int32
+	localRoleResolutions    int32
+	remoteRoleResolutions   int32
+	remoteLegacyResolutions int32
+
 	// state for the optional default resolver function defaultTokenReadFn
 	tokenCached bool
 	// state for the optional default resolver function defaultPolicyResolveFn
@@ -568,6 +578,7 @@ func (d *ACLResolverTestDelegate) ResolveIdentityFromToken(token string) (bool, 
 		return false, nil, nil
 	}
 
+	atomic.AddInt32(&d.localTokenResolutions, 1)
 	return testIdentityForToken(token)
 }
 
@@ -576,6 +587,7 @@ func (d *ACLResolverTestDelegate) ResolvePolicyFromID(policyID string) (bool, *s
 		return false, nil, nil
 	}
 
+	atomic.AddInt32(&d.localPolicyResolutions, 1)
 	return testPolicyForID(policyID)
 }
 
@@ -584,27 +596,32 @@ func (d *ACLResolverTestDelegate) ResolveRoleFromID(roleID string) (bool, *struc
 		return false, nil, nil
 	}
 
+	atomic.AddInt32(&d.localRoleResolutions, 1)
 	return testRoleForID(roleID)
 }
 
 func (d *ACLResolverTestDelegate) RPC(method string, args interface{}, reply interface{}) error {
 	switch method {
 	case "ACL.GetPolicy":
+		atomic.AddInt32(&d.remoteLegacyResolutions, 1)
 		if d.getPolicyFn != nil {
 			return d.getPolicyFn(args.(*structs.ACLPolicyResolveLegacyRequest), reply.(*structs.ACLPolicyResolveLegacyResponse))
 		}
 		panic("Bad Test Implementation: should provide a getPolicyFn to the ACLResolverTestDelegate")
 	case "ACL.TokenRead":
+		atomic.AddInt32(&d.remoteTokenResolutions, 1)
 		if d.tokenReadFn != nil {
 			return d.tokenReadFn(args.(*structs.ACLTokenGetRequest), reply.(*structs.ACLTokenResponse))
 		}
 		panic("Bad Test Implementation: should provide a tokenReadFn to the ACLResolverTestDelegate")
 	case "ACL.PolicyResolve":
+		atomic.AddInt32(&d.remotePolicyResolutions, 1)
 		if d.policyResolveFn != nil {
 			return d.policyResolveFn(args.(*structs.ACLPolicyBatchGetRequest), reply.(*structs.ACLPolicyBatchResponse))
 		}
 		panic("Bad Test Implementation: should provide a policyResolveFn to the ACLResolverTestDelegate")
 	case "ACL.RoleResolve":
+		atomic.AddInt32(&d.remoteRoleResolutions, 1)
 		if d.roleResolveFn != nil {
 			return d.roleResolveFn(args.(*structs.ACLRoleBatchGetRequest), reply.(*structs.ACLRoleBatchResponse))
 		}
@@ -1442,6 +1459,79 @@ func TestACLResolver_Client(t *testing.T) {
 		require.True(t, deleted)
 		require.Equal(t, tokenReads, int32(2))
 		require.Equal(t, policyResolves, int32(3))
+	})
+
+	t.Run("Resolve-Identity", func(t *testing.T) {
+		t.Parallel()
+
+		delegate := &ACLResolverTestDelegate{
+			enabled:       true,
+			datacenter:    "dc1",
+			legacy:        false,
+			localTokens:   false,
+			localPolicies: false,
+		}
+
+		delegate.tokenReadFn = delegate.plainTokenReadFn
+		delegate.policyResolveFn = delegate.plainPolicyResolveFn
+		delegate.roleResolveFn = delegate.plainRoleResolveFn
+
+		r := newTestACLResolver(t, delegate, nil)
+
+		ident, err := r.ResolveTokenToIdentity("found-policy-and-role")
+		require.NoError(t, err)
+		require.NotNil(t, ident)
+		require.Equal(t, "5f57c1f6-6a89-4186-9445-531b316e01df", ident.ID())
+		require.EqualValues(t, 0, delegate.localTokenResolutions)
+		require.EqualValues(t, 1, delegate.remoteTokenResolutions)
+		require.EqualValues(t, 0, delegate.localPolicyResolutions)
+		require.EqualValues(t, 0, delegate.remotePolicyResolutions)
+		require.EqualValues(t, 0, delegate.localRoleResolutions)
+		require.EqualValues(t, 0, delegate.remoteRoleResolutions)
+		require.EqualValues(t, 0, delegate.remoteLegacyResolutions)
+	})
+
+	t.Run("Resolve-Identity-Legacy", func(t *testing.T) {
+		t.Parallel()
+
+		delegate := &ACLResolverTestDelegate{
+			enabled:       true,
+			datacenter:    "dc1",
+			legacy:        true,
+			localTokens:   false,
+			localPolicies: false,
+			getPolicyFn: func(args *structs.ACLPolicyResolveLegacyRequest, reply *structs.ACLPolicyResolveLegacyResponse) error {
+				reply.Parent = "deny"
+				reply.TTL = 30
+				reply.ETag = "nothing"
+				reply.Policy = &acl.Policy{
+					ID: "not-needed",
+					PolicyRules: acl.PolicyRules{
+						Nodes: []*acl.NodeRule{
+							&acl.NodeRule{
+								Name:   "foo",
+								Policy: acl.PolicyWrite,
+							},
+						},
+					},
+				}
+				return nil
+			},
+		}
+
+		r := newTestACLResolver(t, delegate, nil)
+
+		ident, err := r.ResolveTokenToIdentity("found-policy-and-role")
+		require.NoError(t, err)
+		require.NotNil(t, ident)
+		require.Equal(t, "legacy-token", ident.ID())
+		require.EqualValues(t, 0, delegate.localTokenResolutions)
+		require.EqualValues(t, 0, delegate.remoteTokenResolutions)
+		require.EqualValues(t, 0, delegate.localPolicyResolutions)
+		require.EqualValues(t, 0, delegate.remotePolicyResolutions)
+		require.EqualValues(t, 0, delegate.localRoleResolutions)
+		require.EqualValues(t, 0, delegate.remoteRoleResolutions)
+		require.EqualValues(t, 1, delegate.remoteLegacyResolutions)
 	})
 
 	t.Run("Concurrent-Token-Resolve", func(t *testing.T) {
@@ -2870,6 +2960,106 @@ func TestACL_filterNodes(t *testing.T) {
 	filt.filterNodes(&nodes)
 	if len(nodes) != 0 {
 		t.Fatalf("bad: %#v", nodes)
+	}
+}
+
+func TestACL_filterDatacenterCheckServiceNodes(t *testing.T) {
+	t.Parallel()
+	// Create some data.
+	fixture := map[string]structs.CheckServiceNodes{
+		"dc1": []structs.CheckServiceNode{
+			newTestMeshGatewayNode(
+				"dc1", "gateway1a", "1.2.3.4", 5555, map[string]string{structs.MetaWANFederationKey: "1"}, api.HealthPassing,
+			),
+			newTestMeshGatewayNode(
+				"dc1", "gateway2a", "4.3.2.1", 9999, map[string]string{structs.MetaWANFederationKey: "1"}, api.HealthPassing,
+			),
+		},
+		"dc2": []structs.CheckServiceNode{
+			newTestMeshGatewayNode(
+				"dc2", "gateway1b", "5.6.7.8", 9999, map[string]string{structs.MetaWANFederationKey: "1"}, api.HealthPassing,
+			),
+			newTestMeshGatewayNode(
+				"dc2", "gateway2b", "8.7.6.5", 1111, map[string]string{structs.MetaWANFederationKey: "1"}, api.HealthPassing,
+			),
+		},
+	}
+
+	fill := func(t *testing.T) map[string]structs.CheckServiceNodes {
+		t.Helper()
+		dup, err := copystructure.Copy(fixture)
+		require.NoError(t, err)
+		return dup.(map[string]structs.CheckServiceNodes)
+	}
+
+	// Try permissive filtering.
+	{
+		dcNodes := fill(t)
+		filt := newACLFilter(acl.AllowAll(), nil, true)
+		filt.filterDatacenterCheckServiceNodes(&dcNodes)
+		require.Len(t, dcNodes, 2)
+		require.Equal(t, fill(t), dcNodes)
+	}
+
+	// Try restrictive filtering.
+	{
+		dcNodes := fill(t)
+		filt := newACLFilter(acl.DenyAll(), nil, true)
+		filt.filterDatacenterCheckServiceNodes(&dcNodes)
+		require.Len(t, dcNodes, 0)
+	}
+
+	var (
+		policy *acl.Policy
+		err    error
+		perms  acl.Authorizer
+	)
+	// Allowed to see the service but not the node.
+	policy, err = acl.NewPolicyFromSource("", 0, `
+	service_prefix "" { policy = "read" }
+	`, acl.SyntaxCurrent, nil, nil)
+	require.NoError(t, err)
+	perms, err = acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{policy}, nil)
+	require.NoError(t, err)
+
+	{
+		dcNodes := fill(t)
+		filt := newACLFilter(perms, nil, true)
+		filt.filterDatacenterCheckServiceNodes(&dcNodes)
+		require.Len(t, dcNodes, 0)
+	}
+
+	// Allowed to see the node but not the service.
+	policy, err = acl.NewPolicyFromSource("", 0, `
+	node_prefix "" { policy = "read" }
+	`, acl.SyntaxCurrent, nil, nil)
+	require.NoError(t, err)
+	perms, err = acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{policy}, nil)
+	require.NoError(t, err)
+
+	{
+		dcNodes := fill(t)
+		filt := newACLFilter(perms, nil, true)
+		filt.filterDatacenterCheckServiceNodes(&dcNodes)
+		require.Len(t, dcNodes, 0)
+	}
+
+	// Allowed to see the service AND the node
+	policy, err = acl.NewPolicyFromSource("", 0, `
+	service_prefix "" { policy = "read" }
+	node_prefix "" { policy = "read" }
+	`, acl.SyntaxCurrent, nil, nil)
+	require.NoError(t, err)
+	perms, err = acl.NewPolicyAuthorizerWithDefaults(acl.DenyAll(), []*acl.Policy{policy}, nil)
+	require.NoError(t, err)
+
+	// Now it should go through.
+	{
+		dcNodes := fill(t)
+		filt := newACLFilter(acl.AllowAll(), nil, true)
+		filt.filterDatacenterCheckServiceNodes(&dcNodes)
+		require.Len(t, dcNodes, 2)
+		require.Equal(t, fill(t), dcNodes)
 	}
 }
 

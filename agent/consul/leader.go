@@ -340,6 +340,10 @@ func (s *Server) establishLeadership() error {
 
 	s.startConfigReplication()
 
+	s.startFederationStateReplication()
+
+	s.startFederationStateAntiEntropy()
+
 	s.startConnectLeader()
 
 	s.setConsistentReadReady()
@@ -357,6 +361,10 @@ func (s *Server) revokeLeadership() {
 	s.clearAllSessionTimers()
 
 	s.revokeEnterpriseLeadership()
+
+	s.stopFederationStateAntiEntropy()
+
+	s.stopFederationStateReplication()
 
 	s.stopConfigReplication()
 
@@ -436,7 +444,7 @@ func (s *Server) initializeLegacyACL() error {
 	// of state in the state store that will cause problems with older
 	// servers consuming snapshots, so we have to wait to create it.
 	var minVersion = version.Must(version.NewVersion("0.9.1"))
-	if ServersMeetMinimumVersion(s.LANMembers(), minVersion) {
+	if ok, _ := ServersInDCMeetMinimumVersion(s, s.config.Datacenter, minVersion); ok {
 		canBootstrap, _, err := state.CanBootstrapACLToken()
 		if err != nil {
 			return fmt.Errorf("failed looking for ACL bootstrap info: %v", err)
@@ -654,6 +662,9 @@ func (s *Server) initializeACLs(upgrade bool) error {
 			if s.IsACLReplicationEnabled() {
 				s.startLegacyACLReplication()
 			}
+			// return early as we don't want to start new ACL replication
+			// or ACL token reaping as these are new ACL features.
+			return nil
 		}
 
 		if upgrade {
@@ -943,6 +954,20 @@ func (s *Server) stopConfigReplication() {
 	s.leaderRoutineManager.Stop(configReplicationRoutineName)
 }
 
+func (s *Server) startFederationStateReplication() {
+	if s.config.PrimaryDatacenter == "" || s.config.PrimaryDatacenter == s.config.Datacenter {
+		// replication shouldn't run in the primary DC
+		return
+	}
+
+	s.leaderRoutineManager.Start(federationStateReplicationRoutineName, s.federationStateReplicator.Run)
+}
+
+func (s *Server) stopFederationStateReplication() {
+	// will be a no-op when not started
+	s.leaderRoutineManager.Stop(federationStateReplicationRoutineName)
+}
+
 // getOrCreateAutopilotConfig is used to get the autopilot config, initializing it if necessary
 func (s *Server) getOrCreateAutopilotConfig() *autopilot.Config {
 	logger := s.loggers.Named(logging.Autopilot)
@@ -956,7 +981,7 @@ func (s *Server) getOrCreateAutopilotConfig() *autopilot.Config {
 		return config
 	}
 
-	if !ServersMeetMinimumVersion(s.LANMembers(), minAutopilotVersion) {
+	if ok, _ := ServersInDCMeetMinimumVersion(s, s.config.Datacenter, minAutopilotVersion); !ok {
 		logger.Warn("can't initialize until all servers are >= " + minAutopilotVersion.String())
 		return nil
 	}
@@ -982,7 +1007,7 @@ func (s *Server) bootstrapConfigEntries(entries []structs.ConfigEntry) error {
 		return nil
 	}
 
-	if !ServersMeetMinimumVersion(s.LANMembers(), minCentralizedConfigVersion) {
+	if ok, _ := ServersInDCMeetMinimumVersion(s, s.config.Datacenter, minCentralizedConfigVersion); !ok {
 		s.loggers.
 			Named(logging.CentralConfig).
 			Warn("config: can't initialize until all servers >=" + minCentralizedConfigVersion.String())

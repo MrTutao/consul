@@ -3,7 +3,6 @@ package proxy
 import (
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -43,8 +42,7 @@ type cmd struct {
 
 	shutdownCh <-chan struct{}
 
-	logOutput io.Writer
-	logger    hclog.Logger
+	logger hclog.Logger
 
 	// flags
 	logLevel    string
@@ -138,12 +136,10 @@ func (c *cmd) Run(args []string) int {
 		Name:     logging.Proxy,
 		LogJSON:  c.logJSON,
 	}
-	logger, logGate, logOutput, ok := logging.Setup(logConfig, c.UI)
+	logger, logGate, _, ok := logging.Setup(logConfig, c.UI)
 	if !ok {
 		return 1
 	}
-	c.logOutput = logOutput
-
 	c.logger = logger
 
 	// Enable Pprof if needed
@@ -248,13 +244,13 @@ func LookupProxyIDForSidecar(client *api.Client, sidecarFor string) (string, err
 	return proxyIDs[0], nil
 }
 
-// LookupGatewayProxyID finds the mesh-gateway service registered with the local
+// LookupGatewayProxyID finds the gateway service registered with the local
 // agent if any and returns its service ID. It will return an ID if and only if
-// there is exactly one registered mesh-gateway registered to the agent.
-func LookupGatewayProxy(client *api.Client) (*api.AgentService, error) {
-	svcs, err := client.Agent().ServicesWithFilter("Kind == `mesh-gateway`")
+// there is exactly one gateway of this kind registered to the agent.
+func LookupGatewayProxy(client *api.Client, kind api.ServiceKind) (*api.AgentService, error) {
+	svcs, err := client.Agent().ServicesWithFilter(fmt.Sprintf("Kind == `%s`", kind))
 	if err != nil {
-		return nil, fmt.Errorf("Failed looking up mesh-gateway instances: %v", err)
+		return nil, fmt.Errorf("Failed looking up %s instances: %v", kind, err)
 	}
 
 	var proxyIDs []string
@@ -264,14 +260,14 @@ func LookupGatewayProxy(client *api.Client) (*api.AgentService, error) {
 
 	switch len(svcs) {
 	case 0:
-		return nil, fmt.Errorf("No mesh-gateway services registered with this agent")
+		return nil, fmt.Errorf("No %s services registered with this agent", kind)
 	case 1:
 		for _, svc := range svcs {
 			return svc, nil
 		}
 		return nil, fmt.Errorf("This should be unreachable")
 	default:
-		return nil, fmt.Errorf("Cannot lookup the mesh-gateway's proxy ID because multiple are registered with the agent")
+		return nil, fmt.Errorf("Cannot lookup the %s's proxy ID because multiple are registered with the agent", kind)
 	}
 }
 

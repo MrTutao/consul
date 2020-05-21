@@ -1250,3 +1250,118 @@ func TestStore_ReadDiscoveryChainConfigEntries_SubsetSplit(t *testing.T) {
 	require.Len(t, entrySet.Resolvers, 1)
 	require.Len(t, entrySet.Services, 1)
 }
+
+func TestStore_ValidateGatewayNamesCannotBeShared(t *testing.T) {
+	s := testStateStore(t)
+
+	ingress := &structs.IngressGatewayConfigEntry{
+		Kind: structs.IngressGateway,
+		Name: "gateway",
+	}
+	require.NoError(t, s.EnsureConfigEntry(0, ingress, nil))
+
+	terminating := &structs.TerminatingGatewayConfigEntry{
+		Kind: structs.TerminatingGateway,
+		Name: "gateway",
+	}
+	// Cannot have 2 gateways with same service name
+	require.Error(t, s.EnsureConfigEntry(1, terminating, nil))
+
+	ingress = &structs.IngressGatewayConfigEntry{
+		Kind: structs.IngressGateway,
+		Name: "gateway",
+		Listeners: []structs.IngressListener{
+			{Port: 8080},
+		},
+	}
+	require.NoError(t, s.EnsureConfigEntry(2, ingress, nil))
+	require.NoError(t, s.DeleteConfigEntry(3, structs.IngressGateway, "gateway", nil))
+
+	// Adding the terminating gateway with same name should now work
+	require.NoError(t, s.EnsureConfigEntry(4, terminating, nil))
+
+	// Cannot have 2 gateways with same service name
+	require.Error(t, s.EnsureConfigEntry(5, ingress, nil))
+}
+
+func TestStore_ValidateIngressGatewayErrorOnMismatchedProtocols(t *testing.T) {
+	s := testStateStore(t)
+
+	ingress := &structs.IngressGatewayConfigEntry{
+		Kind: structs.IngressGateway,
+		Name: "gateway",
+		Listeners: []structs.IngressListener{
+			{
+				Port:     8080,
+				Protocol: "http",
+				Services: []structs.IngressService{
+					{Name: "web"},
+				},
+			},
+		},
+	}
+
+	t.Run("default to tcp", func(t *testing.T) {
+		err := s.EnsureConfigEntry(0, ingress, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `has protocol "tcp"`)
+	})
+
+	t.Run("with proxy-default", func(t *testing.T) {
+		expected := &structs.ProxyConfigEntry{
+			Kind: structs.ProxyDefaults,
+			Name: "global",
+			Config: map[string]interface{}{
+				"protocol": "http2",
+			},
+		}
+		require.NoError(t, s.EnsureConfigEntry(0, expected, nil))
+
+		err := s.EnsureConfigEntry(1, ingress, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `has protocol "http2"`)
+	})
+
+	t.Run("with service-defaults override", func(t *testing.T) {
+		expected := &structs.ServiceConfigEntry{
+			Kind:     structs.ServiceDefaults,
+			Name:     "web",
+			Protocol: "grpc",
+		}
+		require.NoError(t, s.EnsureConfigEntry(1, expected, nil))
+		err := s.EnsureConfigEntry(2, ingress, nil)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `has protocol "grpc"`)
+	})
+
+	t.Run("with service-defaults correct protocol", func(t *testing.T) {
+		expected := &structs.ServiceConfigEntry{
+			Kind:     structs.ServiceDefaults,
+			Name:     "web",
+			Protocol: "http",
+		}
+		require.NoError(t, s.EnsureConfigEntry(2, expected, nil))
+		require.NoError(t, s.EnsureConfigEntry(3, ingress, nil))
+	})
+
+	t.Run("ignores wildcard specifier", func(t *testing.T) {
+		ingress := &structs.IngressGatewayConfigEntry{
+			Kind: structs.IngressGateway,
+			Name: "gateway",
+			Listeners: []structs.IngressListener{
+				{
+					Port:     8080,
+					Protocol: "http",
+					Services: []structs.IngressService{
+						{Name: "*"},
+					},
+				},
+			},
+		}
+		require.NoError(t, s.EnsureConfigEntry(4, ingress, nil))
+	})
+
+	t.Run("deleting a config entry", func(t *testing.T) {
+		require.NoError(t, s.DeleteConfigEntry(5, structs.IngressGateway, "gateway", nil))
+	})
+}

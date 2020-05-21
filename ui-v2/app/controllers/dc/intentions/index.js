@@ -2,6 +2,7 @@ import Controller from '@ember/controller';
 import { computed, get } from '@ember/object';
 import WithFiltering from 'consul-ui/mixins/with-filtering';
 import WithSearching from 'consul-ui/mixins/with-searching';
+import WithEventSource from 'consul-ui/mixins/with-event-source';
 import ucfirst from 'consul-ui/utils/ucfirst';
 // TODO: DRY out in acls at least
 const createCounter = function(prop) {
@@ -10,9 +11,9 @@ const createCounter = function(prop) {
   };
 };
 const countAction = createCounter('Action');
-export default Controller.extend(WithSearching, WithFiltering, {
+export default Controller.extend(WithSearching, WithFiltering, WithEventSource, {
   queryParams: {
-    action: {
+    currentFilter: {
       as: 'action',
     },
     s: {
@@ -43,7 +44,12 @@ export default Controller.extend(WithSearching, WithFiltering, {
       };
     });
   }),
-  filter: function(item, { s = '', action = '' }) {
-    return action === '' || get(item, 'Action') === action;
+  filter: function(item, { s = '', currentFilter = '' }) {
+    return currentFilter === '' || get(item, 'Action') === currentFilter;
+  },
+  actions: {
+    route: function() {
+      this.send(...arguments);
+    },
   },
 });

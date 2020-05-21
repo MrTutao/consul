@@ -48,7 +48,7 @@ func (m *LeaderRoutineManager) IsRunning(name string) bool {
 }
 
 func (m *LeaderRoutineManager) Start(name string, routine LeaderRoutine) error {
-	return m.StartWithContext(nil, name, routine)
+	return m.StartWithContext(context.TODO(), name, routine)
 }
 
 func (m *LeaderRoutineManager) StartWithContext(parentCtx context.Context, name string, routine LeaderRoutine) error {
@@ -106,6 +106,7 @@ func (m *LeaderRoutineManager) Stop(name string) error {
 
 	m.logger.Debug("stopping routine", "routine", name)
 	instance.cancel()
+
 	delete(m.routines, name)
 	return nil
 }
@@ -122,6 +123,6 @@ func (m *LeaderRoutineManager) StopAll() {
 		routine.cancel()
 	}
 
-	// just whipe out the entire map
+	// just wipe out the entire map
 	m.routines = make(map[string]*leaderRoutine)
 }

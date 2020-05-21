@@ -3,7 +3,6 @@ package agent
 import (
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -59,7 +58,6 @@ type cmd struct {
 	versionHuman      string
 	shutdownCh        <-chan struct{}
 	flagArgs          config.Flags
-	logOutput         io.Writer
 	logger            hclog.InterceptLogger
 }
 
@@ -108,7 +106,7 @@ func (c *cmd) checkpointResults(results *checkpoint.CheckResponse, err error) {
 		return
 	}
 	if results.Outdated {
-		c.logger.Error("Newer Consul version available", "new_version", results.CurrentVersion, "current_version", c.version)
+		c.logger.Info("Newer Consul version available", "new_version", results.CurrentVersion, "current_version", c.version)
 	}
 	for _, alert := range results.Alerts {
 		switch alert.Level {
@@ -205,7 +203,6 @@ func (c *cmd) run(args []string) int {
 	if !ok {
 		return 1
 	}
-	c.logOutput = logOutput
 
 	c.logger = logger
 
@@ -221,6 +218,7 @@ func (c *cmd) run(args []string) int {
 	memSink, err := lib.InitTelemetry(config.Telemetry)
 	if err != nil {
 		c.logger.Error(err.Error())
+		logGate.Flush()
 		return 1
 	}
 
@@ -229,6 +227,7 @@ func (c *cmd) run(args []string) int {
 	agent, err := agent.New(config, c.logger)
 	if err != nil {
 		c.logger.Error("Error creating agent", "error", err)
+		logGate.Flush()
 		return 1
 	}
 	agent.LogOutput = logOutput

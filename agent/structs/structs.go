@@ -67,6 +67,7 @@ const (
 	ACLAuthMethodSetRequestType                 = 27
 	ACLAuthMethodDeleteRequestType              = 28
 	ChunkingStateType                           = 29
+	FederationStateRequestType                  = 30
 )
 
 const (
@@ -98,6 +99,10 @@ const (
 	// MetaSegmentKey is the node metadata key used to store the node's network segment
 	MetaSegmentKey = "consul-network-segment"
 
+	// MetaWANFederationKey is the mesh gateway metadata key that indicates a
+	// mesh gateway is usable for wan federation.
+	MetaWANFederationKey = "consul-wan-federation"
+
 	// MaxLockDelay provides a maximum LockDelay value for
 	// a session. Any value above this will not be respected.
 	MaxLockDelay = 60 * time.Second
@@ -114,6 +119,8 @@ const (
 	// The exact semantics of the wildcard is left up to the code where its used.
 	WildcardSpecifier = "*"
 )
+
+var allowedConsulMetaKeysForMeshGateway = map[string]struct{}{MetaWANFederationKey: struct{}{}}
 
 var (
 	NodeMaintCheckID = NewCheckID(NodeMaint, nil)
@@ -141,6 +148,7 @@ type RPCInfo interface {
 	IsRead() bool
 	AllowStaleRead() bool
 	TokenSecret() string
+	SetTokenSecret(string)
 }
 
 // QueryOptions is used to specify various flags for read queries
@@ -230,6 +238,10 @@ func (q QueryOptions) TokenSecret() string {
 	return q.Token
 }
 
+func (q *QueryOptions) SetTokenSecret(s string) {
+	q.Token = s
+}
+
 type WriteRequest struct {
 	// Token is the ACL token ID. If not provided, the 'anonymous'
 	// token is assumed for backwards compatibility.
@@ -247,6 +259,10 @@ func (w WriteRequest) AllowStaleRead() bool {
 
 func (w WriteRequest) TokenSecret() string {
 	return w.Token
+}
+
+func (w *WriteRequest) SetTokenSecret(s string) {
+	w.Token = s
 }
 
 // QueryMeta allows a query response to include potentially
@@ -497,6 +513,12 @@ type ServiceSpecificRequest struct {
 	// Connect if true will only search for Connect-compatible services.
 	Connect bool
 
+	// TODO(ingress): Add corresponding API changes after figuring out what the
+	// HTTP endpoint looks like
+
+	// Ingress if true will only search for Ingress gateways for the given service.
+	Ingress bool
+
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	QueryOptions
 }
@@ -641,14 +663,30 @@ func (n *Node) IsSame(other *Node) bool {
 		reflect.DeepEqual(n.Meta, other.Meta)
 }
 
+// ValidateNodeMetadata validates a set of key/value pairs from the agent
+// config for use on a Node.
+func ValidateNodeMetadata(meta map[string]string, allowConsulPrefix bool) error {
+	return validateMetadata(meta, allowConsulPrefix, nil)
+}
+
+// ValidateServiceMetadata validates a set of key/value pairs from the agent config for use on a Service.
 // ValidateMeta validates a set of key/value pairs from the agent config
-func ValidateMetadata(meta map[string]string, allowConsulPrefix bool) error {
+func ValidateServiceMetadata(kind ServiceKind, meta map[string]string, allowConsulPrefix bool) error {
+	switch kind {
+	case ServiceKindMeshGateway:
+		return validateMetadata(meta, allowConsulPrefix, allowedConsulMetaKeysForMeshGateway)
+	default:
+		return validateMetadata(meta, allowConsulPrefix, nil)
+	}
+}
+
+func validateMetadata(meta map[string]string, allowConsulPrefix bool, allowedConsulKeys map[string]struct{}) error {
 	if len(meta) > metaMaxKeyPairs {
 		return fmt.Errorf("Node metadata cannot contain more than %d key/value pairs", metaMaxKeyPairs)
 	}
 
 	for key, value := range meta {
-		if err := validateMetaPair(key, value, allowConsulPrefix); err != nil {
+		if err := validateMetaPair(key, value, allowConsulPrefix, allowedConsulKeys); err != nil {
 			return fmt.Errorf("Couldn't load metadata pair ('%s', '%s'): %s", key, value, err)
 		}
 	}
@@ -674,7 +712,7 @@ func ValidateWeights(weights *Weights) error {
 }
 
 // validateMetaPair checks that the given key/value pair is in a valid format
-func validateMetaPair(key, value string, allowConsulPrefix bool) error {
+func validateMetaPair(key, value string, allowConsulPrefix bool, allowedConsulKeys map[string]struct{}) error {
 	if key == "" {
 		return fmt.Errorf("Key cannot be blank")
 	}
@@ -684,8 +722,10 @@ func validateMetaPair(key, value string, allowConsulPrefix bool) error {
 	if len(key) > metaKeyMaxLength {
 		return fmt.Errorf("Key is too long (limit: %d characters)", metaKeyMaxLength)
 	}
-	if strings.HasPrefix(key, metaKeyReservedPrefix) && !allowConsulPrefix {
-		return fmt.Errorf("Key prefix '%s' is reserved for internal use", metaKeyReservedPrefix)
+	if strings.HasPrefix(key, metaKeyReservedPrefix) {
+		if _, ok := allowedConsulKeys[key]; !allowConsulPrefix && !ok {
+			return fmt.Errorf("Key prefix '%s' is reserved for internal use", metaKeyReservedPrefix)
+		}
 	}
 	if len(value) > metaValueMaxLength {
 		return fmt.Errorf("Value is too long (limit: %d characters)", metaValueMaxLength)
@@ -856,21 +896,16 @@ const (
 	// service will proxy connections based off the SNI header set by other
 	// connect proxies
 	ServiceKindMeshGateway ServiceKind = "mesh-gateway"
-)
 
-func ServiceKindFromString(kind string) (ServiceKind, error) {
-	switch kind {
-	case string(ServiceKindTypical):
-		return ServiceKindTypical, nil
-	case string(ServiceKindConnectProxy):
-		return ServiceKindConnectProxy, nil
-	case string(ServiceKindMeshGateway):
-		return ServiceKindMeshGateway, nil
-	default:
-		// have to return something and it may as well be typical
-		return ServiceKindTypical, fmt.Errorf("Invalid service kind: %s", kind)
-	}
-}
+	// ServiceKindTerminatingGateway is a Terminating Gateway for the Connect
+	// feature. This service will proxy connections to services outside the mesh.
+	ServiceKindTerminatingGateway ServiceKind = "terminating-gateway"
+
+	// ServiceKindIngressGateway is an Ingress Gateway for the Connect feature.
+	// This service allows external traffic to enter the mesh based on
+	// centralized configuration.
+	ServiceKindIngressGateway ServiceKind = "ingress-gateway"
+)
 
 // Type to hold a address and port of a service
 type ServiceAddress struct {
@@ -1014,9 +1049,10 @@ func (s *NodeService) IsSidecarProxy() bool {
 	return s.Kind == ServiceKindConnectProxy && s.Proxy.DestinationServiceID != ""
 }
 
-func (s *NodeService) IsMeshGateway() bool {
-	// TODO (mesh-gateway) any other things to check?
-	return s.Kind == ServiceKindMeshGateway
+func (s *NodeService) IsGateway() bool {
+	return s.Kind == ServiceKindMeshGateway ||
+		s.Kind == ServiceKindTerminatingGateway ||
+		s.Kind == ServiceKindIngressGateway
 }
 
 // Validate validates the node service configuration.
@@ -1113,36 +1149,36 @@ func (s *NodeService) Validate() error {
 		}
 	}
 
-	// MeshGateway validation
-	if s.Kind == ServiceKindMeshGateway {
-		// Gateways must have a port
-		if s.Port == 0 {
-			result = multierror.Append(result, fmt.Errorf("Port must be non-zero for a Mesh Gateway"))
+	// Gateway validation
+	if s.IsGateway() {
+		// Non-ingress gateways must have a port
+		if s.Port == 0 && s.Kind != ServiceKindIngressGateway {
+			result = multierror.Append(result, fmt.Errorf("Port must be non-zero for a %s", s.Kind))
 		}
 
 		// Gateways cannot have sidecars
 		if s.Connect.SidecarService != nil {
-			result = multierror.Append(result, fmt.Errorf("Mesh Gateways cannot have a sidecar service defined"))
+			result = multierror.Append(result, fmt.Errorf("A %s cannot have a sidecar service defined", s.Kind))
 		}
 
 		if s.Proxy.DestinationServiceName != "" {
-			result = multierror.Append(result, fmt.Errorf("The Proxy.DestinationServiceName configuration is invalid for Mesh Gateways"))
+			result = multierror.Append(result, fmt.Errorf("The Proxy.DestinationServiceName configuration is invalid for a %s", s.Kind))
 		}
 
 		if s.Proxy.DestinationServiceID != "" {
-			result = multierror.Append(result, fmt.Errorf("The Proxy.DestinationServiceID configuration is invalid for Mesh Gateways"))
+			result = multierror.Append(result, fmt.Errorf("The Proxy.DestinationServiceID configuration is invalid for a %s", s.Kind))
 		}
 
 		if s.Proxy.LocalServiceAddress != "" {
-			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServiceAddress configuration is invalid for Mesh Gateways"))
+			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServiceAddress configuration is invalid for a %s", s.Kind))
 		}
 
 		if s.Proxy.LocalServicePort != 0 {
-			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServicePort configuration is invalid for Mesh Gateways"))
+			result = multierror.Append(result, fmt.Errorf("The Proxy.LocalServicePort configuration is invalid for a %s", s.Kind))
 		}
 
 		if len(s.Proxy.Upstreams) != 0 {
-			result = multierror.Append(result, fmt.Errorf("The Proxy.Upstreams configuration is invalid for Mesh Gateways"))
+			result = multierror.Append(result, fmt.Errorf("The Proxy.Upstreams configuration is invalid for a %s", s.Kind))
 		}
 	}
 
@@ -1518,6 +1554,27 @@ func (nodes CheckServiceNodes) Shuffle() {
 	}
 }
 
+func (nodes CheckServiceNodes) ToServiceDump() ServiceDump {
+	var ret ServiceDump
+	for i := range nodes {
+		svc := ServiceInfo{
+			Node:           nodes[i].Node,
+			Service:        nodes[i].Service,
+			Checks:         nodes[i].Checks,
+			GatewayService: nil,
+		}
+		ret = append(ret, &svc)
+	}
+	return ret
+}
+
+// ShallowClone duplicates the slice and underlying array.
+func (nodes CheckServiceNodes) ShallowClone() CheckServiceNodes {
+	dup := make(CheckServiceNodes, len(nodes))
+	copy(dup, nodes)
+	return dup
+}
+
 // Filter removes nodes that are failing health checks (and any non-passing
 // check if that option is selected). Note that this returns the filtered
 // results AND modifies the receiver for performance.
@@ -1574,6 +1631,15 @@ type NodeInfo struct {
 // as it is rather expensive to generate.
 type NodeDump []*NodeInfo
 
+type ServiceInfo struct {
+	Node           *Node
+	Service        *NodeService
+	Checks         HealthChecks
+	GatewayService *GatewayService
+}
+
+type ServiceDump []*ServiceInfo
+
 type CheckID struct {
 	ID types.CheckID
 	EnterpriseMeta
@@ -1581,11 +1647,6 @@ type CheckID struct {
 
 func NewCheckID(id types.CheckID, entMeta *EnterpriseMeta) CheckID {
 	var cid CheckID
-	cid.Init(id, entMeta)
-	return cid
-}
-
-func (cid *CheckID) Init(id types.CheckID, entMeta *EnterpriseMeta) {
 	cid.ID = id
 	if entMeta == nil {
 		entMeta = DefaultEnterpriseMeta()
@@ -1593,6 +1654,7 @@ func (cid *CheckID) Init(id types.CheckID, entMeta *EnterpriseMeta) {
 
 	cid.EnterpriseMeta = *entMeta
 	cid.EnterpriseMeta.Normalize()
+	return cid
 }
 
 // StringHash is used mainly to populate part of the filename of a check
@@ -1611,11 +1673,6 @@ type ServiceID struct {
 
 func NewServiceID(id string, entMeta *EnterpriseMeta) ServiceID {
 	var sid ServiceID
-	sid.Init(id, entMeta)
-	return sid
-}
-
-func (sid *ServiceID) Init(id string, entMeta *EnterpriseMeta) {
 	sid.ID = id
 	if entMeta == nil {
 		entMeta = DefaultEnterpriseMeta()
@@ -1623,6 +1680,7 @@ func (sid *ServiceID) Init(id string, entMeta *EnterpriseMeta) {
 
 	sid.EnterpriseMeta = *entMeta
 	sid.EnterpriseMeta.Normalize()
+	return sid
 }
 
 func (sid *ServiceID) Matches(other *ServiceID) bool {
@@ -1667,16 +1725,16 @@ type IndexedServices struct {
 	QueryMeta
 }
 
-type ServiceInfo struct {
+type ServiceName struct {
 	Name string
 	EnterpriseMeta
 }
 
-func (si *ServiceInfo) ToServiceID() ServiceID {
+func (si *ServiceName) ToServiceID() ServiceID {
 	return ServiceID{ID: si.Name, EnterpriseMeta: si.EnterpriseMeta}
 }
 
-type ServiceList []ServiceInfo
+type ServiceList []ServiceName
 
 type IndexedServiceList struct {
 	Services ServiceList
@@ -1710,8 +1768,23 @@ type IndexedCheckServiceNodes struct {
 	QueryMeta
 }
 
+type DatacenterIndexedCheckServiceNodes struct {
+	DatacenterNodes map[string]CheckServiceNodes
+	QueryMeta
+}
+
 type IndexedNodeDump struct {
 	Dump NodeDump
+	QueryMeta
+}
+
+type IndexedServiceDump struct {
+	Dump ServiceDump
+	QueryMeta
+}
+
+type IndexedGatewayServices struct {
+	Services GatewayServices
 	QueryMeta
 }
 
@@ -2036,6 +2109,8 @@ func (r *SessionRequest) RequestDatacenter() string {
 type SessionSpecificRequest struct {
 	Datacenter string
 	SessionID  string
+	// DEPRECATED in 1.7.0
+	Session string
 	EnterpriseMeta
 	QueryOptions
 }

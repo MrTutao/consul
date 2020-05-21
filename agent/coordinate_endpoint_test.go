@@ -17,7 +17,7 @@ import (
 
 func TestCoordinate_Disabled_Response(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		disable_coordinates = true
 `)
 	defer a.Shutdown()
@@ -52,7 +52,7 @@ func TestCoordinate_Disabled_Response(t *testing.T) {
 
 func TestCoordinate_Datacenters(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -78,7 +78,7 @@ func TestCoordinate_Datacenters(t *testing.T) {
 
 func TestCoordinate_Nodes(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -229,14 +229,14 @@ func TestCoordinate_Nodes(t *testing.T) {
 
 func TestCoordinate_Node(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
 	// Make sure we get a 404 with no coordinates.
 	req, _ := http.NewRequest("GET", "/v1/coordinate/node/foo?dc=dc1", nil)
 	resp := httptest.NewRecorder()
-	obj, err := a.srv.CoordinateNode(resp, req)
+	_, err := a.srv.CoordinateNode(resp, req)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -285,7 +285,7 @@ func TestCoordinate_Node(t *testing.T) {
 	// Query back and check the nodes are present.
 	req, _ = http.NewRequest("GET", "/v1/coordinate/node/foo?dc=dc1", nil)
 	resp = httptest.NewRecorder()
-	obj, err = a.srv.CoordinateNode(resp, req)
+	obj, err := a.srv.CoordinateNode(resp, req)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestCoordinate_Node(t *testing.T) {
 	// Filter on a nonexistent node segment
 	req, _ = http.NewRequest("GET", "/v1/coordinate/node/foo?segment=nope", nil)
 	resp = httptest.NewRecorder()
-	obj, err = a.srv.CoordinateNode(resp, req)
+	_, err = a.srv.CoordinateNode(resp, req)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestCoordinate_Node(t *testing.T) {
 	// Make sure the empty filter works
 	req, _ = http.NewRequest("GET", "/v1/coordinate/node/foo?segment=", nil)
 	resp = httptest.NewRecorder()
-	obj, err = a.srv.CoordinateNode(resp, req)
+	_, err = a.srv.CoordinateNode(resp, req)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestCoordinate_Node(t *testing.T) {
 
 func TestCoordinate_Update(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -394,7 +394,7 @@ func TestCoordinate_Update(t *testing.T) {
 
 func TestCoordinate_Update_ACLDeny(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), TestACLConfig())
+	a := NewTestAgent(t, TestACLConfig())
 	defer a.Shutdown()
 	testrpc.WaitForLeader(t, a.RPC, "dc1")
 

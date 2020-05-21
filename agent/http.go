@@ -169,20 +169,21 @@ type templatedIndexFS struct {
 
 func (fs *templatedIndexFS) Open(name string) (http.File, error) {
 	file, err := fs.fs.Open(name)
-	if err == nil && name == "/index.html" {
-		content, _ := ioutil.ReadAll(file)
-		file.Seek(0, 0)
-		t, err := template.New("fmtedindex").Parse(string(content))
-		if err != nil {
-			return nil, err
-		}
-		var out bytes.Buffer
-		err = t.Execute(&out, fs.templateVars())
-
-		file = newTemplatedFile(&out, file)
+	if err != nil || name != "/index.html" {
+		return file, err
 	}
 
-	return file, err
+	content, _ := ioutil.ReadAll(file)
+	file.Seek(0, 0)
+	t, err := template.New("fmtedindex").Parse(string(content))
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := t.Execute(&out, fs.templateVars()); err != nil {
+		return nil, err
+	}
+	return newTemplatedFile(&out, file), nil
 }
 
 // endpoint is a Consul-specific HTTP handler that takes the usual arguments in
@@ -322,9 +323,25 @@ func (s *HTTPServer) handler(enableDebug bool) http.Handler {
 			fs := assetFS()
 			uifs = fs
 		}
+
 		uifs = &redirectFS{fs: &templatedIndexFS{fs: uifs, templateVars: s.GenerateHTMLTemplateVars}}
-		mux.Handle("/robots.txt", http.FileServer(uifs))
-		mux.Handle(s.agent.config.UIContentPath, http.StripPrefix(s.agent.config.UIContentPath, http.FileServer(uifs)))
+		// create a http handler using the ui file system
+		// and the headers specified by the http_config.response_headers user config
+		uifsWithHeaders := serveHandlerWithHeaders(
+			http.FileServer(uifs),
+			s.agent.config.HTTPResponseHeaders,
+		)
+		mux.Handle(
+			"/robots.txt",
+			uifsWithHeaders,
+		)
+		mux.Handle(
+			s.agent.config.UIContentPath,
+			http.StripPrefix(
+				s.agent.config.UIContentPath,
+				uifsWithHeaders,
+			),
+		)
 	}
 
 	// Wrap the whole mux with a handler that bans URLs with non-printable
@@ -334,6 +351,7 @@ func (s *HTTPServer) handler(enableDebug bool) http.Handler {
 	if s.agent.config.DisableHTTPUnprintableCharFilter {
 		h = mux
 	}
+	h = s.enterpriseHandler(h)
 	return &wrappedMux{
 		mux:     mux,
 		handler: h,
@@ -479,7 +497,7 @@ func (s *HTTPServer) wrap(handler endpoint, methods []string) http.HandlerFunc {
 				fmt.Fprint(resp, err.Error())
 			case isNotFound(err):
 				resp.WriteHeader(http.StatusNotFound)
-				fmt.Fprintf(resp, err.Error())
+				fmt.Fprint(resp, err.Error())
 			case isTooManyRequests(err):
 				resp.WriteHeader(http.StatusTooManyRequests)
 				fmt.Fprint(resp, err.Error())
@@ -752,6 +770,14 @@ func setHeaders(resp http.ResponseWriter, headers map[string]string) {
 	}
 }
 
+// serveHandlerWithHeaders is used to serve a http.Handler with the specified headers
+func serveHandlerWithHeaders(h http.Handler, headers map[string]string) http.HandlerFunc {
+	return func(resp http.ResponseWriter, req *http.Request) {
+		setHeaders(resp, headers)
+		h.ServeHTTP(resp, req)
+	}
+}
+
 // parseWait is used to parse the ?wait and ?index query params
 // Returns true on error
 func parseWait(resp http.ResponseWriter, req *http.Request, b structs.QueryOptionsCompat) bool {
@@ -901,10 +927,7 @@ func (s *HTTPServer) parseDC(req *http.Request, dc *string) {
 }
 
 // parseTokenInternal is used to parse the ?token query param or the X-Consul-Token header or
-// Authorization Bearer token (RFC6750) and
-// optionally resolve proxy tokens to real ACL tokens. If the token is invalid or not specified it will populate
-// the token with the agents UserToken (acl_token in the consul configuration)
-// Parsing has the following priority: ?token, X-Consul-Token and last "Authorization: Bearer "
+// Authorization Bearer token (RFC6750).
 func (s *HTTPServer) parseTokenInternal(req *http.Request, token *string) {
 	tok := ""
 	if other := req.URL.Query().Get("token"); other != "" {
@@ -925,25 +948,33 @@ func (s *HTTPServer) parseTokenInternal(req *http.Request, token *string) {
 
 			// <Scheme> must be "Bearer"
 			if strings.ToLower(scheme) == "bearer" {
-				// Since Bearer tokens shouldnt contain spaces (rfc6750#section-2.1)
+				// Since Bearer tokens shouldn't contain spaces (rfc6750#section-2.1)
 				// "value" is tokenized, only the first item is used
 				tok = strings.TrimSpace(strings.Split(value, " ")[0])
 			}
 		}
 	}
 
-	if tok != "" {
-		*token = tok
+	*token = tok
+	return
+}
+
+// parseTokenWithDefault passes through to parseTokenInternal and optionally resolves proxy tokens to real ACL tokens.
+// If the token is invalid or not specified it will populate the token with the agents UserToken (acl_token in the
+// consul configuration)
+func (s *HTTPServer) parseTokenWithDefault(req *http.Request, token *string) {
+	s.parseTokenInternal(req, token) // parseTokenInternal modifies *token
+	if token != nil && *token == "" {
+		*token = s.agent.tokens.UserToken()
 		return
 	}
-
-	*token = s.agent.tokens.UserToken()
+	return
 }
 
 // parseToken is used to parse the ?token query param or the X-Consul-Token header or
-// Authorization Bearer token header (RFC6750)
+// Authorization Bearer token header (RFC6750). This function is used widely in Consul's endpoints
 func (s *HTTPServer) parseToken(req *http.Request, token *string) {
-	s.parseTokenInternal(req, token)
+	s.parseTokenWithDefault(req, token)
 }
 
 func sourceAddrFromRequest(req *http.Request) string {
@@ -990,7 +1021,7 @@ func (s *HTTPServer) parseMetaFilter(req *http.Request) map[string]string {
 	if filterList, ok := req.URL.Query()["node-meta"]; ok {
 		filters := make(map[string]string)
 		for _, filter := range filterList {
-			key, value := ParseMetaPair(filter)
+			key, value := parseMetaPair(filter)
 			filters[key] = value
 		}
 		return filters
@@ -998,12 +1029,20 @@ func (s *HTTPServer) parseMetaFilter(req *http.Request) map[string]string {
 	return nil
 }
 
+func parseMetaPair(raw string) (string, string) {
+	pair := strings.SplitN(raw, ":", 2)
+	if len(pair) == 2 {
+		return pair[0], pair[1]
+	}
+	return pair[0], ""
+}
+
 // parseInternal is a convenience method for endpoints that need
 // to use both parseWait and parseDC.
 func (s *HTTPServer) parseInternal(resp http.ResponseWriter, req *http.Request, dc *string, b structs.QueryOptionsCompat) bool {
 	s.parseDC(req, dc)
 	var token string
-	s.parseTokenInternal(req, &token)
+	s.parseTokenWithDefault(req, &token)
 	b.SetToken(token)
 	var filter string
 	s.parseFilter(req, &filter)

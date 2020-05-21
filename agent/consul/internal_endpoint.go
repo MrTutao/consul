@@ -127,6 +127,84 @@ func (m *Internal) ServiceDump(args *structs.ServiceDumpRequest, reply *structs.
 		})
 }
 
+// GatewayServiceNodes returns all the nodes for services associated with a gateway along with their gateway config
+func (m *Internal) GatewayServiceDump(args *structs.ServiceSpecificRequest, reply *structs.IndexedServiceDump) error {
+	if done, err := m.srv.forward("Internal.GatewayServiceDump", args, args, reply); done {
+		return err
+	}
+
+	// Verify the arguments
+	if args.ServiceName == "" {
+		return fmt.Errorf("Must provide gateway name")
+	}
+
+	var authzContext acl.AuthorizerContext
+	authz, err := m.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, &authzContext)
+	if err != nil {
+		return err
+	}
+
+	if err := m.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
+	// We need read access to the gateway we're trying to find services for, so check that first.
+	if authz != nil && authz.ServiceRead(args.ServiceName, &authzContext) != acl.Allow {
+		return acl.ErrPermissionDenied
+	}
+
+	err = m.srv.blockingQuery(
+		&args.QueryOptions,
+		&reply.QueryMeta,
+		func(ws memdb.WatchSet, state *state.Store) error {
+			var maxIdx uint64
+			idx, gatewayServices, err := state.GatewayServices(ws, args.ServiceName, &args.EnterpriseMeta)
+			if err != nil {
+				return err
+			}
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+
+			// Loop over the gateway <-> serviceName mappings and fetch all service instances for each
+			var result structs.ServiceDump
+			for _, gs := range gatewayServices {
+				idx, instances, err := state.CheckServiceNodes(ws, gs.Service.ID, &gs.Service.EnterpriseMeta)
+				if err != nil {
+					return err
+				}
+				if idx > maxIdx {
+					maxIdx = idx
+				}
+				for _, n := range instances {
+					svc := structs.ServiceInfo{
+						Node:           n.Node,
+						Service:        n.Service,
+						Checks:         n.Checks,
+						GatewayService: gs,
+					}
+					result = append(result, &svc)
+				}
+
+				// Ensure we store the gateway <-> service mapping even if there are no instances of the service
+				if len(instances) == 0 {
+					svc := structs.ServiceInfo{
+						GatewayService: gs,
+					}
+					result = append(result, &svc)
+				}
+			}
+			reply.Index, reply.Dump = maxIdx, result
+
+			if err := m.srv.filterACL(args.Token, reply); err != nil {
+				return err
+			}
+			return nil
+		})
+
+	return err
+}
+
 // EventFire is a bit of an odd endpoint, but it allows for a cross-DC RPC
 // call to fire an event. The primary use case is to enable user events being
 // triggered in a remote DC.
@@ -295,4 +373,68 @@ func (m *Internal) aclAccessorID(secretID string) string {
 		return ""
 	}
 	return ident.ID()
+}
+
+func (m *Internal) GatewayServices(args *structs.ServiceSpecificRequest, reply *structs.IndexedGatewayServices) error {
+	if done, err := m.srv.forward("Internal.GatewayServices", args, args, reply); done {
+		return err
+	}
+
+	var authzContext acl.AuthorizerContext
+	authz, err := m.srv.ResolveTokenAndDefaultMeta(args.Token, &args.EnterpriseMeta, &authzContext)
+	if err != nil {
+		return err
+	}
+
+	if err := m.srv.validateEnterpriseRequest(&args.EnterpriseMeta, false); err != nil {
+		return err
+	}
+
+	if authz != nil && authz.ServiceRead(args.ServiceName, &authzContext) != acl.Allow {
+		return acl.ErrPermissionDenied
+	}
+
+	return m.srv.blockingQuery(
+		&args.QueryOptions,
+		&reply.QueryMeta,
+		func(ws memdb.WatchSet, state *state.Store) error {
+			var index uint64
+			var services structs.GatewayServices
+
+			supportedGateways := []string{structs.IngressGateway, structs.TerminatingGateway}
+			var found bool
+			for _, kind := range supportedGateways {
+				// We only use this call to validate the RPC call, don't add the watch set
+				_, entry, err := state.ConfigEntry(nil, kind, args.ServiceName, &args.EnterpriseMeta)
+				if err != nil {
+					return err
+				}
+				if entry != nil {
+					found = true
+				}
+			}
+
+			// We log a warning here to indicate that there is a potential
+			// misconfiguration. We explicitly do NOT return an error because this
+			// can occur in the course of normal operation by deleting a
+			// configuration entry or starting the proxy before registering the
+			// config entry.
+			if !found {
+				m.logger.Warn("no terminating-gateway or ingress-gateway associated with this gateway",
+					"gateway", args.ServiceName,
+				)
+			}
+
+			index, services, err = state.GatewayServices(ws, args.ServiceName, &args.EnterpriseMeta)
+			if err != nil {
+				return err
+			}
+
+			if err := m.srv.filterACL(args.Token, &services); err != nil {
+				return err
+			}
+
+			reply.Index, reply.Services = index, services
+			return nil
+		})
 }

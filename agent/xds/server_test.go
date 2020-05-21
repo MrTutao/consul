@@ -344,10 +344,10 @@ func expectedTLSContextJSON(t *testing.T, snap *proxycfg.ConfigSnapshot, require
 			"tlsCertificates": [
 				{
 					"certificateChain": {
-						"inlineString": "` + strings.Replace(snap.ConnectProxy.Leaf.CertPEM, "\n", "\\n", -1) + `"
+						"inlineString": "` + strings.Replace(snap.Leaf().CertPEM, "\n", "\\n", -1) + `"
 					},
 					"privateKey": {
-						"inlineString": "` + strings.Replace(snap.ConnectProxy.Leaf.PrivateKeyPEM, "\n", "\\n", -1) + `"
+						"inlineString": "` + strings.Replace(snap.Leaf().PrivateKeyPEM, "\n", "\\n", -1) + `"
 					}
 				}
 			],
@@ -400,6 +400,7 @@ func TestServer_StreamAggregatedResources_ACLEnforcement(t *testing.T) {
 		acl         string
 		token       string
 		wantDenied  bool
+		cfgSnap     *proxycfg.ConfigSnapshot
 	}{
 		// Note that although we've stubbed actual ACL checks in the testManager
 		// ConnectAuthorize mock, by asserting against specific reason strings here
@@ -436,6 +437,14 @@ func TestServer_StreamAggregatedResources_ACLEnforcement(t *testing.T) {
 			acl:         `service "not-web" { policy = "write" }`,
 			token:       "service-write-on-not-web",
 			wantDenied:  true,
+		},
+		{
+			name:        "ingress default deny, write token on different service",
+			defaultDeny: true,
+			acl:         `service "not-ingress" { policy = "write" }`,
+			token:       "service-write-on-not-ingress",
+			wantDenied:  true,
+			cfgSnap:     proxycfg.TestConfigSnapshotIngressGateway(t),
 		},
 	}
 
@@ -480,7 +489,10 @@ func TestServer_StreamAggregatedResources_ACLEnforcement(t *testing.T) {
 			mgr.RegisterProxy(t, sid)
 
 			// Deliver a new snapshot
-			snap := proxycfg.TestConfigSnapshot(t)
+			snap := tt.cfgSnap
+			if snap == nil {
+				snap = proxycfg.TestConfigSnapshot(t)
+			}
 			mgr.DeliverConfig(t, sid, snap)
 
 			// Send initial listener discover, in real life Envoy always sends cluster
@@ -840,4 +852,71 @@ func TestServer_Check(t *testing.T) {
 			require.Contains(t, resp.Status.Message, tt.wantReason)
 		})
 	}
+}
+
+func TestServer_StreamAggregatedResources_IngressEmptyResponse(t *testing.T) {
+	logger := testutil.Logger(t)
+	mgr := newTestManager(t)
+	aclResolve := func(id string) (acl.Authorizer, error) {
+		// Allow all
+		return acl.RootAuthorizer("manage"), nil
+	}
+	envoy := NewTestEnvoy(t, "ingress-gateway", "")
+	defer envoy.Close()
+
+	s := Server{
+		Logger:       logger,
+		CfgMgr:       mgr,
+		Authz:        mgr,
+		ResolveToken: aclResolve,
+	}
+	s.Initialize()
+
+	sid := structs.NewServiceID("ingress-gateway", nil)
+
+	go func() {
+		err := s.StreamAggregatedResources(envoy.stream)
+		require.NoError(t, err)
+	}()
+
+	// Register the proxy to create state needed to Watch() on
+	mgr.RegisterProxy(t, sid)
+
+	// Send initial cluster discover
+	envoy.SendReq(t, ClusterType, 0, 0)
+
+	// Check no response sent yet
+	assertChanBlocked(t, envoy.stream.sendCh)
+
+	// Deliver a new snapshot with no services
+	snap := proxycfg.TestConfigSnapshotIngressGatewayNoServices(t)
+	mgr.DeliverConfig(t, sid, snap)
+
+	emptyClusterJSON := `{
+		"versionInfo": "` + hexString(1) + `",
+		"resources": [],
+		"typeUrl": "type.googleapis.com/envoy.api.v2.Cluster",
+		"nonce": "` + hexString(1) + `"
+		}`
+	emptyListenerJSON := `{
+		"versionInfo": "` + hexString(1) + `",
+		"resources": [],
+		"typeUrl": "type.googleapis.com/envoy.api.v2.Listener",
+		"nonce": "` + hexString(2) + `"
+		}`
+	emptyRouteJSON := `{
+		"versionInfo": "` + hexString(1) + `",
+		"resources": [],
+		"typeUrl": "type.googleapis.com/envoy.api.v2.RouteConfiguration",
+		"nonce": "` + hexString(3) + `"
+		}`
+
+	assertResponseSent(t, envoy.stream.sendCh, emptyClusterJSON)
+
+	// Send initial listener discover
+	envoy.SendReq(t, ListenerType, 0, 0)
+	assertResponseSent(t, envoy.stream.sendCh, emptyListenerJSON)
+
+	envoy.SendReq(t, RouteType, 0, 0)
+	assertResponseSent(t, envoy.stream.sendCh, emptyRouteJSON)
 }

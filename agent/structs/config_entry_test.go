@@ -14,7 +14,6 @@ import (
 // TestDecodeConfigEntry is the 'structs' mirror image of
 // command/config/write/config_write_test.go:TestParseConfigEntry
 func TestDecodeConfigEntry(t *testing.T) {
-	t.Parallel()
 
 	for _, tc := range []struct {
 		name      string
@@ -532,6 +531,194 @@ func TestDecodeConfigEntry(t *testing.T) {
 				Name: "main",
 			},
 		},
+		{
+			name: "ingress-gateway: kitchen sink",
+			snake: `
+				kind = "ingress-gateway"
+				name = "ingress-web"
+
+				tls {
+					enabled = true
+				}
+
+				listeners = [
+					{
+						port = 8080
+						protocol = "http"
+						services = [
+							{
+								name = "web"
+								hosts = ["test.example.com", "test2.example.com"]
+							},
+							{
+								name = "db"
+							}
+						]
+					},
+					{
+						port = 9999
+						protocol = "tcp"
+						services = [
+							{
+								name = "mysql"
+							}
+						]
+					},
+					{
+						port = 2234
+						protocol = "tcp"
+						services = [
+							{
+								name = "postgres"
+							}
+						]
+					}
+				]
+			`,
+			camel: `
+				Kind = "ingress-gateway"
+				Name = "ingress-web"
+				TLS {
+					Enabled = true
+				}
+				Listeners = [
+					{
+						Port = 8080
+						Protocol = "http"
+						Services = [
+							{
+								Name = "web"
+								Hosts = ["test.example.com", "test2.example.com"]
+							},
+							{
+								Name = "db"
+							}
+						]
+					},
+					{
+						Port = 9999
+						Protocol = "tcp"
+						Services = [
+							{
+								Name = "mysql"
+							}
+						]
+					},
+					{
+						Port = 2234
+						Protocol = "tcp"
+						Services = [
+							{
+								Name = "postgres"
+							}
+						]
+					}
+				]
+			`,
+			expect: &IngressGatewayConfigEntry{
+				Kind: "ingress-gateway",
+				Name: "ingress-web",
+				TLS: GatewayTLSConfig{
+					Enabled: true,
+				},
+				Listeners: []IngressListener{
+					IngressListener{
+						Port:     8080,
+						Protocol: "http",
+						Services: []IngressService{
+							IngressService{
+								Name:  "web",
+								Hosts: []string{"test.example.com", "test2.example.com"},
+							},
+							IngressService{
+								Name: "db",
+							},
+						},
+					},
+					IngressListener{
+						Port:     9999,
+						Protocol: "tcp",
+						Services: []IngressService{
+							IngressService{
+								Name: "mysql",
+							},
+						},
+					},
+					IngressListener{
+						Port:     2234,
+						Protocol: "tcp",
+						Services: []IngressService{
+							IngressService{
+								Name: "postgres",
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "terminating-gateway: kitchen sink",
+			snake: `
+				kind = "terminating-gateway"
+				name = "terminating-gw-west"
+				services = [
+					{
+						name = "payments",
+						ca_file = "/etc/payments/ca.pem",
+						cert_file = "/etc/payments/cert.pem",
+						key_file = "/etc/payments/tls.key",
+						sni = "mydomain",
+					},
+					{
+						name = "*",
+						ca_file = "/etc/all/ca.pem",
+						cert_file = "/etc/all/cert.pem",
+						key_file = "/etc/all/tls.key",
+						sni = "my-alt-domain",
+					},
+				]
+			`,
+			camel: `
+				Kind = "terminating-gateway"
+				Name = "terminating-gw-west"
+				Services = [
+					{
+						Name = "payments",
+						CAFile = "/etc/payments/ca.pem",
+						CertFile = "/etc/payments/cert.pem",
+						KeyFile = "/etc/payments/tls.key",
+						SNI = "mydomain",
+					},
+					{
+						Name = "*",
+						CAFile = "/etc/all/ca.pem",
+						CertFile = "/etc/all/cert.pem",
+						KeyFile = "/etc/all/tls.key",
+						SNI = "my-alt-domain",
+					},
+				]
+			`,
+			expect: &TerminatingGatewayConfigEntry{
+				Kind: "terminating-gateway",
+				Name: "terminating-gw-west",
+				Services: []LinkedService{
+					{
+						Name:     "payments",
+						CAFile:   "/etc/payments/ca.pem",
+						CertFile: "/etc/payments/cert.pem",
+						KeyFile:  "/etc/payments/tls.key",
+						SNI:      "mydomain",
+					},
+					{
+						Name:     "*",
+						CAFile:   "/etc/all/ca.pem",
+						CertFile: "/etc/all/cert.pem",
+						KeyFile:  "/etc/all/tls.key",
+						SNI:      "my-alt-domain",
+					},
+				},
+			},
+		},
 	} {
 		tc := tc
 
@@ -604,7 +791,6 @@ func TestServiceConfigResponse_MsgPack(t *testing.T) {
 }
 
 func TestConfigEntryResponseMarshalling(t *testing.T) {
-	t.Parallel()
 
 	cases := map[string]ConfigEntryResponse{
 		"nil entry": ConfigEntryResponse{},
@@ -631,7 +817,6 @@ func TestConfigEntryResponseMarshalling(t *testing.T) {
 		name := name
 		tcase := tcase
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 
 			data, err := tcase.MarshalBinary()
 			require.NoError(t, err)

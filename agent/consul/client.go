@@ -131,12 +131,14 @@ func NewClientLogger(config *Config, logger hclog.InterceptLogger, tlsConfigurat
 	}
 
 	connPool := &pool.ConnPool{
+		Server:          false,
 		SrcAddr:         config.RPCSrcAddr,
 		LogOutput:       config.LogOutput,
 		MaxTime:         clientRPCConnMaxIdle,
 		MaxStreams:      clientMaxStreams,
 		TLSConfigurator: tlsConfigurator,
 		ForceTLS:        config.VerifyOutgoing,
+		Datacenter:      config.Datacenter,
 	}
 
 	// Create client
@@ -184,7 +186,7 @@ func NewClientLogger(config *Config, logger hclog.InterceptLogger, tlsConfigurat
 	}
 
 	// Start maintenance task for servers
-	c.routers = router.New(c.logger, c.shutdownCh, c.serf, c.connPool)
+	c.routers = router.New(c.logger, c.shutdownCh, c.serf, c.connPool, "")
 	go c.routers.Start()
 
 	// Start LAN event handlers after the router is complete since the event
@@ -282,11 +284,6 @@ func (c *Client) KeyManagerLAN() *serf.KeyManager {
 	return c.serf.KeyManager()
 }
 
-// Encrypted determines if gossip is encrypted
-func (c *Client) Encrypted() bool {
-	return c.serf.EncryptionEnabled()
-}
-
 // RPC is used to forward an RPC call to a consul server, or fail if no servers
 func (c *Client) RPC(method string, args interface{}, reply interface{}) error {
 	// This is subtle but we start measuring the time on the client side
@@ -311,7 +308,7 @@ TRY:
 	}
 
 	// Make the request.
-	rpcErr := c.connPool.RPC(c.config.Datacenter, server.Addr, server.Version, method, server.UseTLS, args, reply)
+	rpcErr := c.connPool.RPC(c.config.Datacenter, server.ShortName, server.Addr, server.Version, method, args, reply)
 	if rpcErr == nil {
 		return nil
 	}
@@ -359,7 +356,7 @@ func (c *Client) SnapshotRPC(args *structs.SnapshotRequest, in io.Reader, out io
 
 	// Request the operation.
 	var reply structs.SnapshotResponse
-	snap, err := SnapshotRPC(c.connPool, c.config.Datacenter, server.Addr, server.UseTLS, args, in, &reply)
+	snap, err := SnapshotRPC(c.connPool, c.config.Datacenter, server.ShortName, server.Addr, server.UseTLS, args, in, &reply)
 	if err != nil {
 		return err
 	}

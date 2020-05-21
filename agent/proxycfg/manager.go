@@ -7,6 +7,7 @@ import (
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/agent/local"
 	"github.com/hashicorp/consul/agent/structs"
+	"github.com/hashicorp/consul/tlsutil"
 	"github.com/hashicorp/go-hclog"
 )
 
@@ -64,8 +65,11 @@ type ManagerConfig struct {
 	// Datacenter name into other request types that need it. This is sufficient
 	// for now and cleaner than passing the entire RuntimeConfig.
 	Source *structs.QuerySource
+	// DNSConfig is the agent's relevant DNS config for any proxies.
+	DNSConfig DNSConfig
 	// logger is the agent's logger to be used for logging logs.
-	Logger hclog.Logger
+	Logger          hclog.Logger
+	TLSConfigurator *tlsutil.Configurator
 }
 
 // NewManager constructs a manager from the provided agent cache.
@@ -131,7 +135,10 @@ func (m *Manager) syncState() {
 	// Traverse the local state and ensure all proxy services are registered
 	services := m.State.Services(structs.WildcardEnterpriseMeta())
 	for sid, svc := range services {
-		if svc.Kind != structs.ServiceKindConnectProxy && svc.Kind != structs.ServiceKindMeshGateway {
+		if svc.Kind != structs.ServiceKindConnectProxy &&
+			svc.Kind != structs.ServiceKindTerminatingGateway &&
+			svc.Kind != structs.ServiceKindMeshGateway &&
+			svc.Kind != structs.ServiceKindIngressGateway {
 			continue
 		}
 		// TODO(banks): need to work out when to default some stuff. For example
@@ -181,9 +188,13 @@ func (m *Manager) ensureProxyServiceLocked(ns *structs.NodeService, token string
 	}
 
 	// Set the necessary dependencies
-	state.logger = m.Logger
+	state.logger = m.Logger.With("service_id", sid.String())
 	state.cache = m.Cache
 	state.source = m.Source
+	state.dnsConfig = m.DNSConfig
+	if m.TLSConfigurator != nil {
+		state.serverSNIFn = m.TLSConfigurator.ServerSNI
+	}
 
 	ch, err := state.Watch()
 	if err != nil {

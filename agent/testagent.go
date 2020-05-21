@@ -16,6 +16,7 @@ import (
 	"time"
 
 	metrics "github.com/armon/go-metrics"
+	"github.com/hashicorp/errwrap"
 	"github.com/hashicorp/go-hclog"
 	uuid "github.com/hashicorp/go-uuid"
 
@@ -25,7 +26,6 @@ import (
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/sdk/freeport"
-	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 )
 
@@ -86,33 +86,22 @@ type TestAgent struct {
 	*Agent
 }
 
-// NewTestAgent returns a started agent with the given name and
-// configuration. It fails the test if the Agent could not be started. The
-// caller should call Shutdown() to stop the agent and remove temporary
-// directories.
-func NewTestAgent(t *testing.T, name string, hcl string) *TestAgent {
-	return NewTestAgentWithFields(t, true, TestAgent{Name: name, HCL: hcl})
+// NewTestAgent returns a started agent with the given configuration. It fails
+// the test if the Agent could not be started.
+// The caller is responsible for calling Shutdown() to stop the agent and remove
+// temporary directories.
+func NewTestAgent(t *testing.T, hcl string) *TestAgent {
+	return StartTestAgent(t, TestAgent{HCL: hcl})
 }
 
-// NewTestAgentWithFields takes a TestAgent struct with any number of fields set,
-// and a boolean 'start', which indicates whether or not the TestAgent should
-// be started. If no LogOutput is set, it will automatically be set to
-// testutil.TestWriter(t). Name will default to t.Name() if not specified.
-func NewTestAgentWithFields(t *testing.T, start bool, ta TestAgent) *TestAgent {
-	// copy values
-	a := ta
-	if a.Name == "" {
-		a.Name = t.Name()
-	}
-	if a.LogOutput == nil {
-		a.LogOutput = testutil.TestWriter(t)
-	}
-	if !start {
-		return nil
-	}
-
+// StartTestAgent and wait for it to become available. If the agent fails to
+// start the test will be marked failed and execution will stop.
+//
+// The caller is responsible for calling Shutdown() to stop the agent and remove
+// temporary directories.
+func StartTestAgent(t *testing.T, a TestAgent) *TestAgent {
 	retry.RunWith(retry.ThreeTimes(), t, func(r *retry.R) {
-		if err := a.Start(); err != nil {
+		if err := a.Start(t); err != nil {
 			r.Fatal(err)
 		}
 	})
@@ -122,9 +111,14 @@ func NewTestAgentWithFields(t *testing.T, start bool, ta TestAgent) *TestAgent {
 
 // Start starts a test agent. It returns an error if the agent could not be started.
 // If no error is returned, the caller must call Shutdown() when finished.
-func (a *TestAgent) Start() (err error) {
+func (a *TestAgent) Start(t *testing.T) (err error) {
 	if a.Agent != nil {
 		return fmt.Errorf("TestAgent already started")
+	}
+
+	name := a.Name
+	if name == "" {
+		name = "TestAgent"
 	}
 
 	var cleanupTmpDir = func() {
@@ -133,21 +127,21 @@ func (a *TestAgent) Start() (err error) {
 		// the data dir, such as in the Raft configuration.
 		if a.DataDir != "" {
 			if err := os.RemoveAll(a.DataDir); err != nil {
-				fmt.Printf("%s Error resetting data dir: %s", a.Name, err)
+				fmt.Printf("%s Error resetting data dir: %s", name, err)
 			}
 		}
 	}
 
 	var hclDataDir string
 	if a.DataDir == "" {
-		name := "agent"
-		if a.Name != "" {
-			name = a.Name + "-agent"
+		dirname := "agent"
+		if name != "" {
+			dirname = name + "-agent"
 		}
-		name = strings.Replace(name, "/", "_", -1)
-		d, err := ioutil.TempDir(TempDir, name)
+		dirname = strings.Replace(dirname, "/", "_", -1)
+		d, err := ioutil.TempDir(TempDir, dirname)
 		if err != nil {
-			return fmt.Errorf("Error creating data dir %s: %s", filepath.Join(TempDir, name), err)
+			return fmt.Errorf("Error creating data dir %s: %s", filepath.Join(TempDir, dirname), err)
 		}
 		// Convert windows style path to posix style path
 		// to avoid illegal char escape error when hcl
@@ -162,17 +156,18 @@ func (a *TestAgent) Start() (err error) {
 	}
 
 	logger := hclog.NewInterceptLogger(&hclog.LoggerOptions{
-		Name:   a.Name,
-		Level:  hclog.Debug,
-		Output: logOutput,
+		Level:      hclog.Debug,
+		Output:     logOutput,
+		TimeFormat: "04:05.000",
+		Name:       name,
 	})
 
 	portsConfig, returnPortsFn := randomPortsSource(a.UseTLS)
 	a.returnPortsFn = returnPortsFn
 	a.Config = TestConfig(logger,
 		portsConfig,
-		config.Source{Name: a.Name, Format: "hcl", Data: a.HCL},
-		config.Source{Name: a.Name + ".data_dir", Format: "hcl", Data: hclDataDir},
+		config.Source{Name: name, Format: "hcl", Data: a.HCL},
+		config.Source{Name: name + ".data_dir", Format: "hcl", Data: hclDataDir},
 	)
 
 	defer func() {
@@ -218,7 +213,7 @@ func (a *TestAgent) Start() (err error) {
 		agent.ShutdownAgent()
 		agent.ShutdownEndpoints()
 
-		return fmt.Errorf("%s %s Error starting agent: %s", id, a.Name, err)
+		return fmt.Errorf("%s %s Error starting agent: %s", id, name, err)
 	}
 
 	a.Agent = agent
@@ -229,7 +224,7 @@ func (a *TestAgent) Start() (err error) {
 	if err := a.waitForUp(); err != nil {
 		cleanupTmpDir()
 		a.Shutdown()
-		return err
+		return errwrap.Wrapf(name+": {{err}}", err)
 	}
 
 	a.dns = a.dnsServers[0]
@@ -247,7 +242,7 @@ func (a *TestAgent) waitForUp() error {
 	var out structs.IndexedNodes
 	for ; !time.Now().After(deadline); time.Sleep(timer.Wait) {
 		if len(a.httpServers) == 0 {
-			retErr = fmt.Errorf("%s: waiting for server", a.Name)
+			retErr = fmt.Errorf("waiting for server")
 			continue // fail, try again
 		}
 		if a.Config.Bootstrap && a.Config.ServerMode {
@@ -264,11 +259,11 @@ func (a *TestAgent) waitForUp() error {
 				continue // fail, try again
 			}
 			if !out.QueryMeta.KnownLeader {
-				retErr = fmt.Errorf("%s: No leader", a.Name)
+				retErr = fmt.Errorf("No leader")
 				continue // fail, try again
 			}
 			if out.Index == 0 {
-				retErr = fmt.Errorf("%s: Consul index is 0", a.Name)
+				retErr = fmt.Errorf("Consul index is 0")
 				continue // fail, try again
 			}
 			return nil // success
@@ -277,7 +272,7 @@ func (a *TestAgent) waitForUp() error {
 			resp := httptest.NewRecorder()
 			_, err := a.httpServers[0].AgentSelf(resp, req)
 			if err != nil || resp.Code != 200 {
-				retErr = fmt.Errorf("%s: failed OK response: %v", a.Name, err)
+				retErr = fmt.Errorf("failed OK response: %v", err)
 				continue
 			}
 			return nil // success
@@ -378,7 +373,7 @@ func (a *TestAgent) consulConfig() *consul.Config {
 // Instead of relying on one set of ports to be sufficient we retry
 // starting the agent with different ports on port conflict.
 func randomPortsSource(tls bool) (src config.Source, returnPortsFn func()) {
-	ports := freeport.MustTake(6)
+	ports := freeport.MustTake(7)
 
 	var http, https int
 	if tls {
@@ -400,6 +395,7 @@ func randomPortsSource(tls bool) (src config.Source, returnPortsFn func()) {
 				serf_lan = ` + strconv.Itoa(ports[3]) + `
 				serf_wan = ` + strconv.Itoa(ports[4]) + `
 				server = ` + strconv.Itoa(ports[5]) + `
+				grpc = ` + strconv.Itoa(ports[6]) + `
 			}
 		`,
 	}, func() { freeport.Return(ports) }

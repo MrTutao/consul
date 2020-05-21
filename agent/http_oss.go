@@ -52,3 +52,8 @@ func parseACLAuthMethodEnterpriseMeta(req *http.Request, _ *structs.ACLAuthMetho
 
 	return nil
 }
+
+// enterpriseHandler is a noop for the enterprise implementation. we pass the original back
+func (s *HTTPServer) enterpriseHandler(next http.Handler) http.Handler {
+	return next
+}

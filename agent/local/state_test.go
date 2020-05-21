@@ -24,7 +24,7 @@ import (
 
 func TestAgentAntiEntropy_Services(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -244,7 +244,7 @@ func TestAgentAntiEntropy_Services_ConnectProxy(t *testing.T) {
 	t.Parallel()
 
 	assert := assert.New(t)
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -406,7 +406,7 @@ func TestAgentAntiEntropy_Services_ConnectProxy(t *testing.T) {
 
 func TestAgent_ServiceWatchCh(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -490,7 +490,7 @@ func TestAgent_ServiceWatchCh(t *testing.T) {
 
 func TestAgentAntiEntropy_EnableTagOverride(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -621,7 +621,7 @@ func TestAgentAntiEntropy_EnableTagOverride(t *testing.T) {
 
 func TestAgentAntiEntropy_Services_WithChecks(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -751,7 +751,7 @@ var testRegisterRules = `
 
 func TestAgentAntiEntropy_Services_ACLDeny(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), `
+	a := agent.NewTestAgent(t, `
 		acl_datacenter = "dc1"
 		acl_master_token = "root"
 		acl_default_policy = "deny"
@@ -899,7 +899,7 @@ func TestAgentAntiEntropy_Services_ACLDeny(t *testing.T) {
 
 func TestAgentAntiEntropy_Checks(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
@@ -989,101 +989,109 @@ func TestAgentAntiEntropy_Checks(t *testing.T) {
 	}
 	var checks structs.IndexedHealthChecks
 
-	// Verify that we are in sync
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
+	retry.Run(t, func(r *retry.R) {
 
-	// We should have 5 checks (serf included)
-	if len(checks.HealthChecks) != 5 {
-		t.Fatalf("bad: %v", checks)
-	}
-
-	// All the checks should match
-	for _, chk := range checks.HealthChecks {
-		chk.CreateIndex, chk.ModifyIndex = 0, 0
-		switch chk.CheckID {
-		case "mysql":
-			require.Equal(t, chk, chk1)
-		case "redis":
-			require.Equal(t, chk, chk2)
-		case "web":
-			require.Equal(t, chk, chk3)
-		case "cache":
-			require.Equal(t, chk, chk5)
-		case "serfHealth":
-			// ignore
-		default:
-			t.Fatalf("unexpected check: %v", chk)
-		}
-	}
-
-	if err := checksInSync(a.State, 4, structs.DefaultEnterpriseMeta()); err != nil {
-		t.Fatal(err)
-	}
-
-	// Make sure we sent along our node info addresses when we synced.
-	{
-		req := structs.NodeSpecificRequest{
-			Datacenter: "dc1",
-			Node:       a.Config.NodeName,
-		}
-		var services structs.IndexedNodeServices
-		if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
-			t.Fatalf("err: %v", err)
+		// Verify that we are in sync
+		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+			r.Fatalf("err: %v", err)
 		}
 
-		id := services.NodeServices.Node.ID
-		addrs := services.NodeServices.Node.TaggedAddresses
-		meta := services.NodeServices.Node.Meta
-		delete(meta, structs.MetaSegmentKey) // Added later, not in config.
-		assert.Equal(t, a.Config.NodeID, id)
-		assert.Equal(t, a.Config.TaggedAddresses, addrs)
-		assert.Equal(t, a.Config.NodeMeta, meta)
-	}
-
-	// Remove one of the checks
-	a.State.RemoveCheck(structs.NewCheckID("redis", nil))
-
-	if err := a.State.SyncFull(); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// Verify that we are in sync
-	if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
-		t.Fatalf("err: %v", err)
-	}
-
-	// We should have 5 checks (serf included)
-	if len(checks.HealthChecks) != 4 {
-		t.Fatalf("bad: %v", checks)
-	}
-
-	// All the checks should match
-	for _, chk := range checks.HealthChecks {
-		chk.CreateIndex, chk.ModifyIndex = 0, 0
-		switch chk.CheckID {
-		case "mysql":
-			require.Equal(t, chk1, chk)
-		case "web":
-			require.Equal(t, chk3, chk)
-		case "cache":
-			require.Equal(t, chk5, chk)
-		case "serfHealth":
-			// ignore
-		default:
-			t.Fatalf("unexpected check: %v", chk)
+		// We should have 5 checks (serf included)
+		if len(checks.HealthChecks) != 5 {
+			r.Fatalf("bad: %v", checks)
 		}
-	}
 
-	if err := checksInSync(a.State, 3, structs.DefaultEnterpriseMeta()); err != nil {
-		t.Fatal(err)
-	}
+		// All the checks should match
+		for _, chk := range checks.HealthChecks {
+			chk.CreateIndex, chk.ModifyIndex = 0, 0
+			switch chk.CheckID {
+			case "mysql":
+				require.Equal(t, chk, chk1)
+			case "redis":
+				require.Equal(t, chk, chk2)
+			case "web":
+				require.Equal(t, chk, chk3)
+			case "cache":
+				require.Equal(t, chk, chk5)
+			case "serfHealth":
+				// ignore
+			default:
+				r.Fatalf("unexpected check: %v", chk)
+			}
+		}
+
+		if err := checksInSync(a.State, 4, structs.DefaultEnterpriseMeta()); err != nil {
+			r.Fatal(err)
+		}
+	})
+
+	retry.Run(t, func(r *retry.R) {
+
+		// Make sure we sent along our node info addresses when we synced.
+		{
+			req := structs.NodeSpecificRequest{
+				Datacenter: "dc1",
+				Node:       a.Config.NodeName,
+			}
+			var services structs.IndexedNodeServices
+			if err := a.RPC("Catalog.NodeServices", &req, &services); err != nil {
+				r.Fatalf("err: %v", err)
+			}
+
+			id := services.NodeServices.Node.ID
+			addrs := services.NodeServices.Node.TaggedAddresses
+			meta := services.NodeServices.Node.Meta
+			delete(meta, structs.MetaSegmentKey) // Added later, not in config.
+			assert.Equal(t, a.Config.NodeID, id)
+			assert.Equal(t, a.Config.TaggedAddresses, addrs)
+			assert.Equal(t, a.Config.NodeMeta, meta)
+		}
+	})
+	retry.Run(t, func(r *retry.R) {
+
+		// Remove one of the checks
+		a.State.RemoveCheck(structs.NewCheckID("redis", nil))
+
+		if err := a.State.SyncFull(); err != nil {
+			r.Fatalf("err: %v", err)
+		}
+
+		// Verify that we are in sync
+		if err := a.RPC("Health.NodeChecks", &req, &checks); err != nil {
+			r.Fatalf("err: %v", err)
+		}
+
+		// We should have 5 checks (serf included)
+		if len(checks.HealthChecks) != 4 {
+			r.Fatalf("bad: %v", checks)
+		}
+
+		// All the checks should match
+		for _, chk := range checks.HealthChecks {
+			chk.CreateIndex, chk.ModifyIndex = 0, 0
+			switch chk.CheckID {
+			case "mysql":
+				require.Equal(t, chk1, chk)
+			case "web":
+				require.Equal(t, chk3, chk)
+			case "cache":
+				require.Equal(t, chk5, chk)
+			case "serfHealth":
+				// ignore
+			default:
+				r.Fatalf("unexpected check: %v", chk)
+			}
+		}
+
+		if err := checksInSync(a.State, 3, structs.DefaultEnterpriseMeta()); err != nil {
+			r.Fatal(err)
+		}
+	})
 }
 
 func TestAgentAntiEntropy_RemovingServiceAndCheck(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
@@ -1159,12 +1167,12 @@ func TestAgentAntiEntropy_RemovingServiceAndCheck(t *testing.T) {
 func TestAgentAntiEntropy_Checks_ACLDeny(t *testing.T) {
 	t.Parallel()
 	dc := "dc1"
-	a := &agent.TestAgent{Name: t.Name(), HCL: `
+	a := &agent.TestAgent{HCL: `
 		acl_datacenter = "` + dc + `"
 		acl_master_token = "root"
 		acl_default_policy = "deny"
 		acl_enforce_version_8 = true`}
-	if err := a.Start(); err != nil {
+	if err := a.Start(t); err != nil {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
@@ -1378,7 +1386,7 @@ func TestAgentAntiEntropy_Checks_ACLDeny(t *testing.T) {
 
 func TestAgent_UpdateCheck_DiscardOutput(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), `
+	a := agent.NewTestAgent(t, `
 		discard_check_output = true
 		check_update_interval = "0s" # set to "0s" since otherwise output checks are deferred
 	`)
@@ -1429,10 +1437,10 @@ func TestAgent_UpdateCheck_DiscardOutput(t *testing.T) {
 
 func TestAgentAntiEntropy_Check_DeferSync(t *testing.T) {
 	t.Parallel()
-	a := &agent.TestAgent{Name: t.Name(), HCL: `
+	a := &agent.TestAgent{HCL: `
 		check_update_interval = "500ms"
 	`}
-	if err := a.Start(); err != nil {
+	if err := a.Start(t); err != nil {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
@@ -1637,12 +1645,12 @@ func TestAgentAntiEntropy_NodeInfo(t *testing.T) {
 	nodeMeta := map[string]string{
 		"somekey": "somevalue",
 	}
-	a := &agent.TestAgent{Name: t.Name(), HCL: `
+	a := &agent.TestAgent{HCL: `
 		node_id = "40e4a748-2192-161a-0510-9bf59fe950b5"
 		node_meta {
 			somekey = "somevalue"
 		}`}
-	if err := a.Start(); err != nil {
+	if err := a.Start(t); err != nil {
 		t.Fatal(err)
 	}
 	defer a.Shutdown()
@@ -1900,7 +1908,7 @@ func TestAgent_AliasCheck(t *testing.T) {
 
 func TestAgent_sendCoordinate(t *testing.T) {
 	t.Parallel()
-	a := agent.NewTestAgent(t, t.Name(), `
+	a := agent.NewTestAgent(t, `
 		sync_coordinate_interval_min = "1ms"
 		sync_coordinate_rate_target = 10.0
 		consul = {
@@ -2032,7 +2040,7 @@ func TestState_Notify(t *testing.T) {
 func TestAliasNotifications_local(t *testing.T) {
 	t.Parallel()
 
-	a := agent.NewTestAgent(t, t.Name(), "")
+	a := agent.NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")

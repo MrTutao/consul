@@ -14,6 +14,7 @@ import (
 	"github.com/hashicorp/consul/sdk/testutil/retry"
 	"github.com/hashicorp/consul/testrpc"
 	"github.com/hashicorp/consul/types"
+	"github.com/stretchr/testify/require"
 )
 
 func verifySession(t *testing.T, r *retry.R, a *TestAgent, want structs.Session) {
@@ -62,7 +63,7 @@ func verifySession(t *testing.T, r *retry.R, a *TestAgent, want structs.Session)
 
 func TestSessionCreate(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
@@ -120,7 +121,7 @@ func TestSessionCreate(t *testing.T) {
 
 func TestSessionCreate_NodeChecks(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
@@ -181,7 +182,7 @@ func TestSessionCreate_NodeChecks(t *testing.T) {
 
 func TestSessionCreate_Delete(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -239,7 +240,7 @@ func TestSessionCreate_Delete(t *testing.T) {
 
 func TestSessionCreate_DefaultCheck(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -275,7 +276,7 @@ func TestSessionCreate_DefaultCheck(t *testing.T) {
 
 func TestSessionCreate_NoCheck(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
@@ -431,7 +432,7 @@ func makeTestSessionTTL(t *testing.T, srv *HTTPServer, ttl string) string {
 
 func TestSessionDestroy(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -451,7 +452,7 @@ func TestSessionDestroy(t *testing.T) {
 func TestSessionCustomTTL(t *testing.T) {
 	t.Parallel()
 	ttl := 250 * time.Millisecond
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		session_ttl_min = "250ms"
 	`)
 	defer a.Shutdown()
@@ -495,7 +496,7 @@ func TestSessionCustomTTL(t *testing.T) {
 func TestSessionTTLRenew(t *testing.T) {
 	// t.Parallel() // timing test. no parallel
 	ttl := 250 * time.Millisecond
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		session_ttl_min = "250ms"
 	`)
 	defer a.Shutdown()
@@ -582,7 +583,7 @@ func TestSessionTTLRenew(t *testing.T) {
 func TestSessionGet(t *testing.T) {
 	t.Parallel()
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -604,7 +605,7 @@ func TestSessionGet(t *testing.T) {
 	})
 
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -628,7 +629,7 @@ func TestSessionGet(t *testing.T) {
 
 func TestSessionList(t *testing.T) {
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -648,7 +649,7 @@ func TestSessionList(t *testing.T) {
 	})
 
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -676,7 +677,7 @@ func TestSessionList(t *testing.T) {
 func TestSessionsForNode(t *testing.T) {
 	t.Parallel()
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -696,7 +697,7 @@ func TestSessionsForNode(t *testing.T) {
 	})
 
 	t.Run("", func(t *testing.T) {
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -715,15 +716,17 @@ func TestSessionsForNode(t *testing.T) {
 		if !ok {
 			t.Fatalf("should work")
 		}
-		if len(respObj) != 10 {
-			t.Fatalf("bad: %v", respObj)
+		respIDs := make([]string, 0, len(ids))
+		for _, session := range respObj {
+			respIDs = append(respIDs, session.ID)
 		}
+		require.ElementsMatch(t, ids, respIDs)
 	})
 }
 
 func TestSessionDeleteDestroy(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 

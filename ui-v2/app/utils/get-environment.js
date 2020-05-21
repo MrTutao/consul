@@ -9,27 +9,46 @@ export default function(config = {}, win = window, doc = document) {
     const item = win.localStorage.getItem(str);
     return item === null ? undefined : item;
   };
-  const getCurrentResource = function(scripts) {
-    const current = scripts[scripts.length - 1];
+  const getResourceFor = function(src) {
     try {
-      return win.performance.getEntriesByType('resource').find(item => {
-        // current is based on the assumption that whereever this script is it's
-        // likely to be the same as the xmlhttprequests
-        return item.initiatorType === 'script' && current.src === item.name;
-      });
+      return (
+        win.performance.getEntriesByType('resource').find(item => {
+          return item.initiatorType === 'script' && src === item.name;
+        }) || {}
+      );
     } catch (e) {
       return {};
     }
   };
-  const resource = getCurrentResource(doc.getElementsByTagName('script'));
-
-  // TODO: Look to see if we can pull in HTTP headers here
-  // so we can let things be controlled via HTTP proxies, for example
-  // turning off blocking queries if its a busy cluster etc
+  const scripts = doc.getElementsByTagName('script');
+  // we use the currently executing script as a reference
+  // to figure out where we are for other things such as
+  // base url, api url etc
+  const currentSrc = scripts[scripts.length - 1].src;
+  let resource;
+  // TODO: Potentially use ui_config {}, for example
+  // turning off blocking queries if its a busy cluster
+  // forcing/providing amount of possible HTTP connections
+  // re-setting the base url for the API etc
   const operator = function(str, env) {
     let protocol;
     switch (str) {
+      case 'CONSUL_BASE_UI_URL':
+        return currentSrc
+          .split('/')
+          .slice(0, -2)
+          .join('/');
       case 'CONSUL_HTTP_PROTOCOL':
+        if (typeof resource === 'undefined') {
+          // resource needs to be retrieved lazily as entries aren't guaranteed
+          // to be available at script execution time (caching seems to affect this)
+          // waiting until we retrieve this value lazily at runtime means that
+          // the entries are always available as these values are only retrieved
+          // after initialization
+          // current is based on the assumption that whereever this script is it's
+          // likely to be the same as the xmlhttprequests
+          resource = getResourceFor(currentSrc);
+        }
         return resource.nextHopProtocol || 'http/1.1';
       case 'CONSUL_HTTP_MAX_CONNECTIONS':
         protocol = env('CONSUL_HTTP_PROTOCOL');
@@ -63,6 +82,9 @@ export default function(config = {}, win = window, doc = document) {
             case 'CONSUL_NSPACES_ENABLE':
               prev['CONSUL_NSPACES_ENABLED'] = !!JSON.parse(String(value).toLowerCase());
               break;
+            case 'CONSUL_SSO_ENABLE':
+              prev['CONSUL_SSO_ENABLED'] = !!JSON.parse(String(value).toLowerCase());
+              break;
             default:
               prev[key] = value;
           }
@@ -88,6 +110,7 @@ export default function(config = {}, win = window, doc = document) {
         // these are strings
         return user(str) || ui(str);
 
+      case 'CONSUL_BASE_UI_URL':
       case 'CONSUL_HTTP_PROTOCOL':
       case 'CONSUL_HTTP_MAX_CONNECTIONS':
         // We allow the operator to set these ones via various methods

@@ -10,6 +10,7 @@ import (
 
 	"github.com/hashicorp/consul/agent/cache"
 	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/sdk/testutil"
 	"github.com/hashicorp/consul/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -409,6 +410,112 @@ func TestStructs_NodeService_ValidateMeshGateway(t *testing.T) {
 			if tc.Err == "" {
 				require.NoError(t, err)
 			} else {
+				require.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tc.Err))
+			}
+		})
+	}
+}
+
+func TestStructs_NodeService_ValidateTerminatingGateway(t *testing.T) {
+	type testCase struct {
+		Modify func(*NodeService)
+		Err    string
+	}
+
+	cases := map[string]testCase{
+		"valid": testCase{
+			func(x *NodeService) {},
+			"",
+		},
+		"sidecar-service": testCase{
+			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
+			"cannot have a sidecar service",
+		},
+		"proxy-destination-name": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
+			"Proxy.DestinationServiceName configuration is invalid",
+		},
+		"proxy-destination-id": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
+			"Proxy.DestinationServiceID configuration is invalid",
+		},
+		"proxy-local-address": testCase{
+			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
+			"Proxy.LocalServiceAddress configuration is invalid",
+		},
+		"proxy-local-port": testCase{
+			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
+			"Proxy.LocalServicePort configuration is invalid",
+		},
+		"proxy-upstreams": testCase{
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+			"Proxy.Upstreams configuration is invalid",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := TestNodeServiceTerminatingGateway(t, "10.0.0.5")
+			tc.Modify(ns)
+
+			err := ns.Validate()
+			if tc.Err == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				require.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tc.Err))
+			}
+		})
+	}
+}
+
+func TestStructs_NodeService_ValidateIngressGateway(t *testing.T) {
+	type testCase struct {
+		Modify func(*NodeService)
+		Err    string
+	}
+
+	cases := map[string]testCase{
+		"valid": testCase{
+			func(x *NodeService) {},
+			"",
+		},
+		"sidecar-service": testCase{
+			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
+			"cannot have a sidecar service",
+		},
+		"proxy-destination-name": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
+			"Proxy.DestinationServiceName configuration is invalid",
+		},
+		"proxy-destination-id": testCase{
+			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
+			"Proxy.DestinationServiceID configuration is invalid",
+		},
+		"proxy-local-address": testCase{
+			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
+			"Proxy.LocalServiceAddress configuration is invalid",
+		},
+		"proxy-local-port": testCase{
+			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
+			"Proxy.LocalServicePort configuration is invalid",
+		},
+		"proxy-upstreams": testCase{
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+			"Proxy.Upstreams configuration is invalid",
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ns := TestNodeServiceIngressGateway(t, "10.0.0.5")
+			tc.Modify(ns)
+
+			err := ns.Validate()
+			if tc.Err == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
 				require.Contains(t, strings.ToLower(err.Error()), strings.ToLower(tc.Err))
 			}
 		})
@@ -1164,45 +1271,102 @@ func TestStructs_DirEntry_Clone(t *testing.T) {
 	}
 }
 
-func TestStructs_ValidateMetadata(t *testing.T) {
-	// Load a valid set of key/value pairs
-	meta := map[string]string{
-		"key1": "value1",
-		"key2": "value2",
-	}
-	// Should succeed
-	if err := ValidateMetadata(meta, false); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Should get error
-	meta = map[string]string{
-		"": "value1",
-	}
-	if err := ValidateMetadata(meta, false); !strings.Contains(err.Error(), "Couldn't load metadata pair") {
-		t.Fatalf("should have failed")
-	}
-
-	// Should get error
-	meta = make(map[string]string)
+func TestStructs_ValidateServiceAndNodeMetadata(t *testing.T) {
+	tooMuchMeta := make(map[string]string)
 	for i := 0; i < metaMaxKeyPairs+1; i++ {
-		meta[string(i)] = "value"
+		tooMuchMeta[string(i)] = "value"
 	}
-	if err := ValidateMetadata(meta, false); !strings.Contains(err.Error(), "cannot contain more than") {
-		t.Fatalf("should have failed")
+	type testcase struct {
+		Meta              map[string]string
+		AllowConsulPrefix bool
+		NodeError         string
+		ServiceError      string
+		GatewayError      string
+	}
+	cases := map[string]testcase{
+		"should succeed": {
+			map[string]string{
+				"key1": "value1",
+				"key2": "value2",
+			},
+			false,
+			"",
+			"",
+			"",
+		},
+		"invalid key": {
+			map[string]string{
+				"": "value1",
+			},
+			false,
+			"Couldn't load metadata pair",
+			"Couldn't load metadata pair",
+			"Couldn't load metadata pair",
+		},
+		"too many keys": {
+			tooMuchMeta,
+			false,
+			"cannot contain more than",
+			"cannot contain more than",
+			"cannot contain more than",
+		},
+		"reserved key prefix denied": {
+			map[string]string{
+				metaKeyReservedPrefix + "key": "value1",
+			},
+			false,
+			"reserved for internal use",
+			"reserved for internal use",
+			"reserved for internal use",
+		},
+		"reserved key prefix allowed": {
+			map[string]string{
+				metaKeyReservedPrefix + "key": "value1",
+			},
+			true,
+			"",
+			"",
+			"",
+		},
+		"reserved key prefix allowed via whitelist just for gateway - " + MetaWANFederationKey: {
+			map[string]string{
+				MetaWANFederationKey: "value1",
+			},
+			false,
+			"reserved for internal use",
+			"reserved for internal use",
+			"",
+		},
 	}
 
-	// Should not error
-	meta = map[string]string{
-		metaKeyReservedPrefix + "key": "value1",
-	}
-	// Should fail
-	if err := ValidateMetadata(meta, false); err == nil || !strings.Contains(err.Error(), "reserved for internal use") {
-		t.Fatalf("err: %s", err)
-	}
-	// Should succeed
-	if err := ValidateMetadata(meta, true); err != nil {
-		t.Fatalf("err: %s", err)
+	for name, tc := range cases {
+		tc := tc
+		t.Run(name, func(t *testing.T) {
+			t.Run("ValidateNodeMetadata", func(t *testing.T) {
+				err := ValidateNodeMetadata(tc.Meta, tc.AllowConsulPrefix)
+				if tc.NodeError == "" {
+					require.NoError(t, err)
+				} else {
+					testutil.RequireErrorContains(t, err, tc.NodeError)
+				}
+			})
+			t.Run("ValidateServiceMetadata - typical", func(t *testing.T) {
+				err := ValidateServiceMetadata(ServiceKindTypical, tc.Meta, tc.AllowConsulPrefix)
+				if tc.ServiceError == "" {
+					require.NoError(t, err)
+				} else {
+					testutil.RequireErrorContains(t, err, tc.ServiceError)
+				}
+			})
+			t.Run("ValidateServiceMetadata - mesh-gateway", func(t *testing.T) {
+				err := ValidateServiceMetadata(ServiceKindMeshGateway, tc.Meta, tc.AllowConsulPrefix)
+				if tc.GatewayError == "" {
+					require.NoError(t, err)
+				} else {
+					testutil.RequireErrorContains(t, err, tc.GatewayError)
+				}
+			})
+		})
 	}
 }
 
@@ -1214,27 +1378,32 @@ func TestStructs_validateMetaPair(t *testing.T) {
 		Value             string
 		Error             string
 		AllowConsulPrefix bool
+		AllowConsulKeys   map[string]struct{}
 	}{
 		// valid pair
-		{"key", "value", "", false},
+		{"key", "value", "", false, nil},
 		// invalid, blank key
-		{"", "value", "cannot be blank", false},
+		{"", "value", "cannot be blank", false, nil},
 		// allowed special chars in key name
-		{"k_e-y", "value", "", false},
+		{"k_e-y", "value", "", false, nil},
 		// disallowed special chars in key name
-		{"(%key&)", "value", "invalid characters", false},
+		{"(%key&)", "value", "invalid characters", false, nil},
 		// key too long
-		{longKey, "value", "Key is too long", false},
+		{longKey, "value", "Key is too long", false, nil},
 		// reserved prefix
-		{metaKeyReservedPrefix + "key", "value", "reserved for internal use", false},
+		{metaKeyReservedPrefix + "key", "value", "reserved for internal use", false, nil},
 		// reserved prefix, allowed
-		{metaKeyReservedPrefix + "key", "value", "", true},
+		{metaKeyReservedPrefix + "key", "value", "", true, nil},
+		// reserved prefix, not allowed via whitelist
+		{metaKeyReservedPrefix + "bad", "value", "reserved for internal use", false, map[string]struct{}{metaKeyReservedPrefix + "good": struct{}{}}},
+		// reserved prefix, allowed via whitelist
+		{metaKeyReservedPrefix + "good", "value", "", true, map[string]struct{}{metaKeyReservedPrefix + "good": struct{}{}}},
 		// value too long
-		{"key", longValue, "Value is too long", false},
+		{"key", longValue, "Value is too long", false, nil},
 	}
 
 	for _, pair := range pairs {
-		err := validateMetaPair(pair.Key, pair.Value, pair.AllowConsulPrefix)
+		err := validateMetaPair(pair.Key, pair.Value, pair.AllowConsulPrefix, pair.AllowConsulKeys)
 		if pair.Error == "" && err != nil {
 			t.Fatalf("should have succeeded: %v, %v", pair, err)
 		} else if pair.Error != "" && !strings.Contains(err.Error(), pair.Error) {
@@ -1380,7 +1549,6 @@ func TestSpecificServiceRequest_CacheInfo(t *testing.T) {
 }
 
 func TestNodeService_JSON_OmitTaggedAdddresses(t *testing.T) {
-	t.Parallel()
 	cases := []struct {
 		name string
 		ns   NodeService
@@ -1403,7 +1571,6 @@ func TestNodeService_JSON_OmitTaggedAdddresses(t *testing.T) {
 		name := tc.name
 		ns := tc.ns
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			data, err := json.Marshal(ns)
 			require.NoError(t, err)
 			var raw map[string]interface{}
@@ -1416,7 +1583,6 @@ func TestNodeService_JSON_OmitTaggedAdddresses(t *testing.T) {
 }
 
 func TestServiceNode_JSON_OmitServiceTaggedAdddresses(t *testing.T) {
-	t.Parallel()
 	cases := []struct {
 		name string
 		sn   ServiceNode
@@ -1439,7 +1605,6 @@ func TestServiceNode_JSON_OmitServiceTaggedAdddresses(t *testing.T) {
 		name := tc.name
 		sn := tc.sn
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			data, err := json.Marshal(sn)
 			require.NoError(t, err)
 			var raw map[string]interface{}
@@ -1452,7 +1617,6 @@ func TestServiceNode_JSON_OmitServiceTaggedAdddresses(t *testing.T) {
 }
 
 func TestNode_BestAddress(t *testing.T) {
-	t.Parallel()
 
 	type testCase struct {
 		input   Node
@@ -1489,7 +1653,6 @@ func TestNode_BestAddress(t *testing.T) {
 		name := name
 		tc := tc
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 
 			require.Equal(t, tc.lanAddr, tc.input.BestAddress(false))
 			require.Equal(t, tc.wanAddr, tc.input.BestAddress(true))
@@ -1498,7 +1661,6 @@ func TestNode_BestAddress(t *testing.T) {
 }
 
 func TestNodeService_BestAddress(t *testing.T) {
-	t.Parallel()
 
 	type testCase struct {
 		input   NodeService
@@ -1591,7 +1753,6 @@ func TestNodeService_BestAddress(t *testing.T) {
 		name := name
 		tc := tc
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 
 			addr, port := tc.input.BestAddress(false)
 			require.Equal(t, tc.lanAddr, addr)
@@ -1605,7 +1766,6 @@ func TestNodeService_BestAddress(t *testing.T) {
 }
 
 func TestCheckServiceNode_BestAddress(t *testing.T) {
-	t.Parallel()
 
 	type testCase struct {
 		input   CheckServiceNode
@@ -1759,7 +1919,6 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 		name := name
 		tc := tc
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 
 			addr, port := tc.input.BestAddress(false)
 			require.Equal(t, tc.lanAddr, addr)
@@ -1962,4 +2121,64 @@ func TestSnapshotRequestResponse_MsgpackEncodeDecode(t *testing.T) {
 		TestMsgpackEncodeDecode(t, in, true)
 	})
 
+}
+
+func TestGatewayService_IsSame(t *testing.T) {
+	gateway := NewServiceID("gateway", nil)
+	svc := NewServiceID("web", nil)
+	kind := ServiceKindTerminatingGateway
+	ca := "ca.pem"
+	cert := "client.pem"
+	key := "tls.key"
+	sni := "mydomain"
+	wildcard := false
+
+	g := &GatewayService{
+		Gateway:      gateway,
+		Service:      svc,
+		GatewayKind:  kind,
+		CAFile:       ca,
+		CertFile:     cert,
+		KeyFile:      key,
+		SNI:          sni,
+		FromWildcard: wildcard,
+	}
+	other := &GatewayService{
+		Gateway:      gateway,
+		Service:      svc,
+		GatewayKind:  kind,
+		CAFile:       ca,
+		CertFile:     cert,
+		KeyFile:      key,
+		SNI:          sni,
+		FromWildcard: wildcard,
+	}
+	check := func(twiddle, restore func()) {
+		t.Helper()
+		if !g.IsSame(other) || !other.IsSame(g) {
+			t.Fatalf("should be the same")
+		}
+
+		twiddle()
+		if g.IsSame(other) || other.IsSame(g) {
+			t.Fatalf("should be different, was %#v VS %#v", g, other)
+		}
+
+		restore()
+		if !g.IsSame(other) || !other.IsSame(g) {
+			t.Fatalf("should be the same")
+		}
+	}
+	check(func() { other.Gateway = NewServiceID("other", nil) }, func() { other.Gateway = gateway })
+	check(func() { other.Service = NewServiceID("other", nil) }, func() { other.Service = svc })
+	check(func() { other.GatewayKind = ServiceKindIngressGateway }, func() { other.GatewayKind = kind })
+	check(func() { other.CAFile = "/certs/cert.pem" }, func() { other.CAFile = ca })
+	check(func() { other.CertFile = "/certs/cert.pem" }, func() { other.CertFile = cert })
+	check(func() { other.KeyFile = "/certs/cert.pem" }, func() { other.KeyFile = key })
+	check(func() { other.SNI = "alt-domain" }, func() { other.SNI = sni })
+	check(func() { other.FromWildcard = true }, func() { other.FromWildcard = wildcard })
+
+	if !g.IsSame(other) {
+		t.Fatalf("should be equal, was %#v VS %#v", g, other)
+	}
 }

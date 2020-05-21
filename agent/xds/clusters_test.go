@@ -6,6 +6,7 @@ import (
 	"sort"
 	"testing"
 	"text/template"
+	"time"
 
 	envoy "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	"github.com/hashicorp/consul/agent/proxycfg"
@@ -245,8 +246,17 @@ func TestClustersFromSnapshot(t *testing.T) {
 			},
 		},
 		{
+			name:   "expose-paths-grpc-new-cluster-http1",
+			create: proxycfg.TestConfigSnapshotGRPCExposeHTTP1,
+		},
+		{
 			name:   "mesh-gateway",
 			create: proxycfg.TestConfigSnapshotMeshGateway,
+			setup:  nil,
+		},
+		{
+			name:   "mesh-gateway-using-federation-states",
+			create: proxycfg.TestConfigSnapshotMeshGatewayUsingFederationStates,
 			setup:  nil,
 		},
 		{
@@ -275,6 +285,211 @@ func TestClustersFromSnapshot(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:   "mesh-gateway-ignore-extra-resolvers",
+			create: proxycfg.TestConfigSnapshotMeshGateway,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.MeshGateway.ServiceResolvers = map[structs.ServiceID]*structs.ServiceResolverConfigEntry{
+					structs.NewServiceID("bar", nil): &structs.ServiceResolverConfigEntry{
+						Kind:          structs.ServiceResolver,
+						Name:          "bar",
+						DefaultSubset: "v2",
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": structs.ServiceResolverSubset{
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": structs.ServiceResolverSubset{
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+					structs.NewServiceID("notfound", nil): &structs.ServiceResolverConfigEntry{
+						Kind:          structs.ServiceResolver,
+						Name:          "notfound",
+						DefaultSubset: "v2",
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": structs.ServiceResolverSubset{
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": structs.ServiceResolverSubset{
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+				}
+			},
+		},
+		{
+			name:   "mesh-gateway-service-timeouts",
+			create: proxycfg.TestConfigSnapshotMeshGateway,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.MeshGateway.ServiceResolvers = map[structs.ServiceID]*structs.ServiceResolverConfigEntry{
+					structs.NewServiceID("bar", nil): &structs.ServiceResolverConfigEntry{
+						Kind:           structs.ServiceResolver,
+						Name:           "bar",
+						ConnectTimeout: 10 * time.Second,
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": structs.ServiceResolverSubset{
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": structs.ServiceResolverSubset{
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+				}
+			},
+		},
+		{
+			name:   "ingress-gateway",
+			create: proxycfg.TestConfigSnapshotIngressGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-gateway-no-services",
+			create: proxycfg.TestConfigSnapshotIngressGatewayNoServices,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-chain",
+			create: proxycfg.TestConfigSnapshotIngress,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-chain-external-sni",
+			create: proxycfg.TestConfigSnapshotIngressExternalSNI,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-chain-and-overrides",
+			create: proxycfg.TestConfigSnapshotIngressWithOverrides,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-chain-and-failover",
+			create: proxycfg.TestConfigSnapshotIngressWithFailover,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-failover-through-remote-gateway",
+			create: proxycfg.TestConfigSnapshotIngressWithFailoverThroughRemoteGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-failover-through-remote-gateway-triggered",
+			create: proxycfg.TestConfigSnapshotIngressWithFailoverThroughRemoteGatewayTriggered,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-double-failover-through-remote-gateway",
+			create: proxycfg.TestConfigSnapshotIngressWithDoubleFailoverThroughRemoteGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-double-failover-through-remote-gateway-triggered",
+			create: proxycfg.TestConfigSnapshotIngressWithDoubleFailoverThroughRemoteGatewayTriggered,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-failover-through-local-gateway",
+			create: proxycfg.TestConfigSnapshotIngressWithFailoverThroughLocalGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-failover-through-local-gateway-triggered",
+			create: proxycfg.TestConfigSnapshotIngressWithFailoverThroughLocalGatewayTriggered,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-double-failover-through-local-gateway",
+			create: proxycfg.TestConfigSnapshotIngressWithDoubleFailoverThroughLocalGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-with-tcp-chain-double-failover-through-local-gateway-triggered",
+			create: proxycfg.TestConfigSnapshotIngressWithDoubleFailoverThroughLocalGatewayTriggered,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-splitter-with-resolver-redirect",
+			create: proxycfg.TestConfigSnapshotIngress_SplitterWithResolverRedirectMultiDC,
+			setup:  nil,
+		},
+		{
+			name:   "terminating-gateway",
+			create: proxycfg.TestConfigSnapshotTerminatingGateway,
+			setup:  nil,
+		},
+		{
+			name:   "terminating-gateway-no-services",
+			create: proxycfg.TestConfigSnapshotTerminatingGatewayNoServices,
+			setup:  nil,
+		},
+		{
+			name:   "terminating-gateway-service-subsets",
+			create: proxycfg.TestConfigSnapshotTerminatingGateway,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.TerminatingGateway.ServiceResolvers = map[structs.ServiceID]*structs.ServiceResolverConfigEntry{
+					structs.NewServiceID("web", nil): {
+						Kind: structs.ServiceResolver,
+						Name: "web",
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": {
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": {
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+				}
+			},
+		},
+		{
+			name:   "terminating-gateway-ignore-extra-resolvers",
+			create: proxycfg.TestConfigSnapshotTerminatingGateway,
+			setup: func(snap *proxycfg.ConfigSnapshot) {
+				snap.TerminatingGateway.ServiceResolvers = map[structs.ServiceID]*structs.ServiceResolverConfigEntry{
+					structs.NewServiceID("web", nil): {
+						Kind:          structs.ServiceResolver,
+						Name:          "web",
+						DefaultSubset: "v2",
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": {
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": {
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+					structs.NewServiceID("notfound", nil): {
+						Kind:          structs.ServiceResolver,
+						Name:          "notfound",
+						DefaultSubset: "v2",
+						Subsets: map[string]structs.ServiceResolverSubset{
+							"v1": {
+								Filter: "Service.Meta.Version == 1",
+							},
+							"v2": {
+								Filter:      "Service.Meta.Version == 2",
+								OnlyPassing: true,
+							},
+						},
+					},
+				}
+			},
+		},
+		{
+			name:   "ingress-multiple-listeners-duplicate-service",
+			create: proxycfg.TestConfigSnapshotIngress_MultipleListenersDuplicateService,
+			setup:  nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -287,13 +502,7 @@ func TestClustersFromSnapshot(t *testing.T) {
 			// We need to replace the TLS certs with deterministic ones to make golden
 			// files workable. Note we don't update these otherwise they'd change
 			// golder files for every test case and so not be any use!
-			if snap.ConnectProxy.Leaf != nil {
-				snap.ConnectProxy.Leaf.CertPEM = golden(t, "test-leaf-cert", "")
-				snap.ConnectProxy.Leaf.PrivateKeyPEM = golden(t, "test-leaf-key", "")
-			}
-			if snap.Roots != nil {
-				snap.Roots.Roots[0].RootCert = golden(t, "test-root-cert", "")
-			}
+			setupTLSRootsAndLeaf(t, snap)
 
 			if tt.setup != nil {
 				tt.setup(snap)
@@ -441,35 +650,6 @@ type customClusterJSONOptions struct {
 	TLSContext  string
 }
 
-var customEDSClusterJSONTpl = `{
-	{{ if .IncludeType -}}
-	"@type": "type.googleapis.com/envoy.api.v2.Cluster",
-	{{- end }}
-	{{ if .TLSContext -}}
-	"tlsContext": {{ .TLSContext }},
-	{{- end }}
-	"name": "{{ .Name }}",
-	"type": "EDS",
-	"edsClusterConfig": {
-		"edsConfig": {
-			"ads": {
-
-			}
-		}
-	},
-	"connectTimeout": "5s"
-}`
-
-var customEDSClusterJSONTemplate = template.Must(template.New("").Parse(customEDSClusterJSONTpl))
-
-func customEDSClusterJSON(t *testing.T, opts customClusterJSONOptions) string {
-	t.Helper()
-	var buf bytes.Buffer
-	err := customEDSClusterJSONTemplate.Execute(&buf, opts)
-	require.NoError(t, err)
-	return buf.String()
-}
-
 var customAppClusterJSONTpl = `{
 	{{ if .IncludeType -}}
 	"@type": "type.googleapis.com/envoy.api.v2.Cluster",
@@ -497,4 +677,20 @@ func customAppClusterJSON(t *testing.T, opts customClusterJSONOptions) string {
 	err := customAppClusterJSONTemplate.Execute(&buf, opts)
 	require.NoError(t, err)
 	return buf.String()
+}
+
+func setupTLSRootsAndLeaf(t *testing.T, snap *proxycfg.ConfigSnapshot) {
+	if snap.Leaf() != nil {
+		switch snap.Kind {
+		case structs.ServiceKindConnectProxy:
+			snap.ConnectProxy.Leaf.CertPEM = golden(t, "test-leaf-cert", "")
+			snap.ConnectProxy.Leaf.PrivateKeyPEM = golden(t, "test-leaf-key", "")
+		case structs.ServiceKindIngressGateway:
+			snap.IngressGateway.Leaf.CertPEM = golden(t, "test-leaf-cert", "")
+			snap.IngressGateway.Leaf.PrivateKeyPEM = golden(t, "test-leaf-key", "")
+		}
+	}
+	if snap.Roots != nil {
+		snap.Roots.Roots[0].RootCert = golden(t, "test-root-cert", "")
+	}
 }

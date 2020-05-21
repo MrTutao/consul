@@ -7,16 +7,10 @@ GOTOOLS = \
 	golang.org/x/tools/cmd/stringer \
 	github.com/gogo/protobuf/protoc-gen-gofast@$(GOGOVERSION) \
 	github.com/hashicorp/protoc-gen-go-binary \
-	github.com/vektra/mockery/cmd/mockery
+	github.com/vektra/mockery/cmd/mockery \
+	github.com/golangci/golangci-lint/cmd/golangci-lint@v1.23.6
 
 GOTAGS ?=
-GOMODULES ?= ./... ./api/... ./sdk/...
-GOFILES ?= $(shell go list $(GOMODULES) | grep -v /vendor/)
-ifeq ($(origin GOTEST_PKGS_EXCLUDE), undefined)
-GOTEST_PKGS ?= $(GOMODULES)
-else
-GOTEST_PKGS=$(shell go list $(GOMODULES) | sed 's/github.com\/hashicorp\/consul/./' | egrep -v "^($(GOTEST_PKGS_EXCLUDE))$$")
-endif
 GOOS?=$(shell go env GOOS)
 GOARCH?=$(shell go env GOARCH)
 GOPATH=$(shell go env GOPATH)
@@ -210,14 +204,16 @@ publish:
 dev-tree:
 	@$(SHELL) $(CURDIR)/build-support/scripts/dev.sh $(DEV_PUSH_ARG)
 
-cov:
-	go test $(GOMODULES) -coverprofile=coverage.out
+cover: cov
+cov: other-consul dev-build
+	go test -tags '$(GOTAGS)' ./... -coverprofile=coverage.out
+	cd sdk && go test -tags '$(GOTAGS)' ./... -coverprofile=../coverage.sdk.part
+	cd api && go test -tags '$(GOTAGS)' ./... -coverprofile=../coverage.api.part
+	grep -h -v "mode: set" coverage.{sdk,api}.part >> coverage.out
+	rm -f coverage.{sdk,api}.part
 	go tool cover -html=coverage.out
 
-test: other-consul dev-build vet test-install-deps test-internal
-
-test-install-deps:
-	go test -tags '$(GOTAGS)' -i $(GOTEST_PKGS)
+test: other-consul dev-build lint test-internal
 
 go-mod-tidy:
 	@echo "--> Running go mod tidy"
@@ -240,7 +236,14 @@ test-internal:
 	@# hide it from travis as it exceeds their log limits and causes job to be
 	@# terminated (over 4MB and over 10k lines in the UI). We need to output
 	@# _something_ to stop them terminating us due to inactivity...
-	{ go test -v $(GOTEST_FLAGS) -tags '$(GOTAGS)' $(GOTEST_PKGS) 2>&1 ; echo $$? > exit-code ; } | tee test.log | egrep '^(ok|FAIL|panic:|--- FAIL|--- PASS)'
+	@echo "===================== submodule: sdk =====================" | tee -a test.log
+	cd sdk && { go test -v $(GOTEST_FLAGS) -tags '$(GOTAGS)' ./... 2>&1 ; echo $$? >> ../exit-code ; } | tee -a ../test.log | egrep '^(ok|FAIL|panic:|--- FAIL|--- PASS)'
+	@echo "===================== submodule: api =====================" | tee -a test.log
+	cd api && { go test -v $(GOTEST_FLAGS) -tags '$(GOTAGS)' ./... 2>&1 ; echo $$? >> ../exit-code ; } | tee -a ../test.log | egrep '^(ok|FAIL|panic:|--- FAIL|--- PASS)'
+	@echo "===================== submodule: root =====================" | tee -a test.log
+	{           go test -v $(GOTEST_FLAGS) -tags '$(GOTAGS)' ./... 2>&1 ; echo $$? >> exit-code    ; } | tee -a test.log    | egrep '^(ok|FAIL|panic:|--- FAIL|--- PASS)'
+	@# if everything worked fine then all 3 zeroes will be collapsed to a single zero here
+	@exit_codes="$$(sort -u exit-code)" ; echo "$$exit_codes" > exit-code
 	@echo "Exit code: $$(cat exit-code)"
 	@# This prints all the race report between ====== lines
 	@awk '/^WARNING: DATA RACE/ {do_print=1; print "=================="} do_print==1 {print} /^={10,}/ {do_print=0}' test.log || true
@@ -258,21 +261,7 @@ test-internal:
 test-race:
 	$(MAKE) GOTEST_FLAGS=-race
 
-# Run tests with config for CI so `make test` can still be local-dev friendly.
-test-ci: other-consul dev-build vet test-install-deps
-	@ if ! GOTEST_FLAGS="-short -timeout 8m -p 3 -parallel 4" make test-internal; then \
-	    echo "    ============"; \
-	    echo "      Retrying 1/2"; \
-	    echo "    ============"; \
-	    if ! GOTEST_FLAGS="-timeout 9m -p 1 -parallel 1" make test-internal; then \
-	       echo "    ============"; \
-	       echo "      Retrying 2/2"; \
-	       echo "    ============"; \
-	       GOTEST_FLAGS="-timeout 9m -p 1 -parallel 1" make test-internal; \
-	    fi \
-	fi
-
-test-flake: other-consul vet test-install-deps
+test-flake: other-consul lint
 	@$(SHELL) $(CURDIR)/build-support/scripts/test-flake.sh --pkg "$(FLAKE_PKG)" --test "$(FLAKE_TEST)" --cpus "$(FLAKE_CPUS)" --n "$(FLAKE_N)"
 
 test-docker: linux go-build-image
@@ -289,7 +278,6 @@ test-docker: linux go-build-image
 	@echo "Running tests within a docker container"
 	@docker run -ti --rm \
 		-e 'GOTEST_FLAGS=$(GOTEST_FLAGS)' \
-		-e 'GOTEST_PKGS=$(GOTEST_PKGS)' \
 		-e 'GOTAGS=$(GOTAGS)' \
 		-e 'GIT_COMMIT=$(GIT_COMMIT)' \
 		-e 'GIT_COMMIT_YEAR=$(GIT_COMMIT_YEAR)' \
@@ -311,25 +299,11 @@ other-consul:
 		exit 1 ; \
 	fi
 
-cover:
-	go test $(GOFILES) --cover
-
-format:
-	@echo "--> Running go fmt"
-	@go fmt ./...
-	@cd api && go fmt ./... | sed 's@^@api/@'
-	@cd sdk && go fmt ./... | sed 's@^@sdk/@'
-
-vet:
-	@echo "--> Running go vet"
-	@go vet -tags '$(GOTAGS)' ./... && \
-		(cd api && go vet -tags '$(GOTAGS)' ./...) && \
-		(cd sdk && go vet -tags '$(GOTAGS)' ./...); if [ $$? -ne 0 ]; then \
-		echo ""; \
-		echo "Vet found suspicious constructs. Please check the reported constructs"; \
-		echo "and fix them if necessary before submitting the code for review."; \
-		exit 1; \
-	fi
+lint:
+	@echo "--> Running go golangci-lint"
+	@golangci-lint run --build-tags '$(GOTAGS)' && \
+		(cd api && golangci-lint run --build-tags '$(GOTAGS)') && \
+		(cd sdk && golangci-lint run --build-tags '$(GOTAGS)')
 
 # If you've run "make ui" manually then this will get called for you. This is
 # also run as part of the release build script when it verifies that there are no
@@ -380,16 +354,16 @@ ui-docker: ui-build-image
 	@$(SHELL) $(CURDIR)/build-support/scripts/build-docker.sh ui
 
 test-envoy-integ: $(ENVOY_INTEG_DEPS)
-	@$(SHELL) $(CURDIR)/test/integration/connect/envoy/run-tests.sh
+	@go test -v -timeout=30m -tags integration ./test/integration/connect/envoy
 
-test-vault-ca-provider:
+test-connect-ca-providers:
 ifeq ("$(CIRCLECI)","true")
 # Run in CI
-	gotestsum --format=short-verbose --junitfile "$(TEST_RESULTS_DIR)/gotestsum-report.xml" -- $(CURDIR)/agent/connect/ca/* -run 'TestVault(CA)?Provider'
+	gotestsum --format=short-verbose --junitfile "$(TEST_RESULTS_DIR)/gotestsum-report.xml" -- ./agent/connect/ca
 else
 # Run locally
-	@echo "Running /agent/connect/ca TestVault(CA)?Provider tests in verbose mode"
-	@go test $(CURDIR)/agent/connect/ca/* -run 'TestVault(CA)?Provider' -v
+	@echo "Running /agent/connect/ca tests in verbose mode"
+	@go test -v ./agent/connect/ca
 endif
 
 proto-delete:
@@ -408,6 +382,6 @@ proto: $(PROTOGOFILES) $(PROTOGOBINFILES)
 	@$(SHELL) $(CURDIR)/build-support/scripts/proto-gen.sh --grpc --import-replace "$<"
 
 
-.PHONY: all ci bin dev dist cov test test-ci test-internal test-install-deps cover format vet ui static-assets tools
+.PHONY: all ci bin dev dist cov test test-flake test-internal cover lint ui static-assets tools
 .PHONY: docker-images go-build-image ui-build-image static-assets-docker consul-docker ui-docker
 .PHONY: version proto proto-rebuild proto-delete test-envoy-integ

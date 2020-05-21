@@ -103,6 +103,10 @@ func (id *missingIdentity) IsExpired(asOf time.Time) bool {
 	return false
 }
 
+func (id *missingIdentity) IsLocal() bool {
+	return false
+}
+
 func (id *missingIdentity) EnterpriseMetadata() *structs.EnterpriseMeta {
 	return structs.DefaultEnterpriseMeta()
 }
@@ -1110,6 +1114,30 @@ func (r *ACLResolver) ResolveToken(token string) (acl.Authorizer, error) {
 	return authz, err
 }
 
+func (r *ACLResolver) ResolveTokenToIdentity(token string) (structs.ACLIdentity, error) {
+	if !r.ACLsEnabled() {
+		return nil, nil
+	}
+
+	if acl.RootAuthorizer(token) != nil {
+		return nil, acl.ErrRootDenied
+	}
+
+	// handle the anonymous token
+	if token == "" {
+		token = anonymousToken
+	}
+
+	if r.delegate.UseLegacyACLs() {
+		identity, _, err := r.resolveTokenLegacy(token)
+		return identity, r.disableACLsWhenUpstreamDisabled(err)
+	}
+
+	defer metrics.MeasureSince([]string{"acl", "ResolveTokenToIdentity"}, time.Now())
+
+	return r.resolveIdentityFromToken(token)
+}
+
 func (r *ACLResolver) ACLsEnabled() bool {
 	// Whether we desire ACLs to be enabled according to configuration
 	if !r.delegate.ACLsEnabled() {
@@ -1165,6 +1193,23 @@ func (f *aclFilter) allowNode(node string, ent *acl.AuthorizerContext) bool {
 	}
 
 	return f.authorizer.NodeRead(node, ent) == acl.Allow
+}
+
+// allowNode is used to determine if the gateway and service are accessible for an ACL
+func (f *aclFilter) allowGateway(gs *structs.GatewayService) bool {
+	var authzContext acl.AuthorizerContext
+
+	// Need read on service and gateway. Gateway may have different EnterpriseMeta so we fill authzContext twice
+	gs.Gateway.FillAuthzContext(&authzContext)
+	if !f.allowService(gs.Gateway.ID, &authzContext) {
+		return false
+	}
+
+	gs.Service.FillAuthzContext(&authzContext)
+	if !f.allowService(gs.Service.ID, &authzContext) {
+		return false
+	}
+	return true
 }
 
 // allowService is used to determine if a service is accessible for an ACL.
@@ -1320,6 +1365,20 @@ func (f *aclFilter) filterCheckServiceNodes(nodes *structs.CheckServiceNodes) {
 	*nodes = csn
 }
 
+// filterDatacenterCheckServiceNodes is used to filter nodes based on ACL rules.
+func (f *aclFilter) filterDatacenterCheckServiceNodes(datacenterNodes *map[string]structs.CheckServiceNodes) {
+	dn := *datacenterNodes
+	out := make(map[string]structs.CheckServiceNodes)
+	for dc, _ := range dn {
+		nodes := dn[dc]
+		f.filterCheckServiceNodes(&nodes)
+		if len(nodes) > 0 {
+			out[dc] = nodes
+		}
+	}
+	*datacenterNodes = out
+}
+
 // filterSessions is used to filter a set of sessions based on ACLs.
 func (f *aclFilter) filterSessions(sessions *structs.Sessions) {
 	s := *sessions
@@ -1418,6 +1477,33 @@ func (f *aclFilter) filterNodeDump(dump *structs.NodeDump) {
 		}
 	}
 	*dump = nd
+}
+
+// filterServiceDump is used to filter nodes based on ACL rules.
+func (f *aclFilter) filterServiceDump(services *structs.ServiceDump) {
+	svcs := *services
+	var authzContext acl.AuthorizerContext
+
+	for i := 0; i < len(svcs); i++ {
+		service := svcs[i]
+
+		if f.allowGateway(service.GatewayService) {
+			// ServiceDump might only have gateway config and no node information
+			if service.Node == nil {
+				continue
+			}
+
+			service.Service.FillAuthzContext(&authzContext)
+			if f.allowNode(service.Node.Node, &authzContext) {
+				continue
+			}
+		}
+
+		f.logger.Debug("dropping service from result due to ACLs", "service", service.GatewayService.Service)
+		svcs = append(svcs[:i], svcs[i+1:]...)
+		i--
+	}
+	*services = svcs
 }
 
 // filterNodes is used to filter through all parts of a node list and remove
@@ -1684,6 +1770,24 @@ func (f *aclFilter) filterServiceList(services *structs.ServiceList) {
 	*services = ret
 }
 
+// filterGatewayServices is used to filter gateway to service mappings based on ACL rules.
+func (f *aclFilter) filterGatewayServices(mappings *structs.GatewayServices) {
+	ret := make(structs.GatewayServices, 0, len(*mappings))
+	for _, s := range *mappings {
+		// This filter only checks ServiceRead on the linked service.
+		// ServiceRead on the gateway is checked in the GatewayServices endpoint before filtering.
+		var authzContext acl.AuthorizerContext
+		s.Service.FillAuthzContext(&authzContext)
+
+		if f.authorizer.ServiceRead(s.Service.ID, &authzContext) != acl.Allow {
+			f.logger.Debug("dropping service from result due to ACLs", "service", s.Service.String())
+			continue
+		}
+		ret = append(ret, s)
+	}
+	*mappings = ret
+}
+
 func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj interface{}) error {
 	if authorizer == nil {
 		return nil
@@ -1698,6 +1802,9 @@ func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj in
 	case *structs.IndexedCheckServiceNodes:
 		filt.filterCheckServiceNodes(&v.Nodes)
 
+	case *structs.DatacenterIndexedCheckServiceNodes:
+		filt.filterDatacenterCheckServiceNodes(&v.DatacenterNodes)
+
 	case *structs.IndexedCoordinates:
 		filt.filterCoordinates(&v.Coordinates)
 
@@ -1709,6 +1816,9 @@ func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj in
 
 	case *structs.IndexedNodeDump:
 		filt.filterNodeDump(&v.Dump)
+
+	case *structs.IndexedServiceDump:
+		filt.filterServiceDump(&v.Dump)
 
 	case *structs.IndexedNodes:
 		filt.filterNodes(&v.Nodes)
@@ -1765,6 +1875,10 @@ func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj in
 
 	case *structs.IndexedServiceList:
 		filt.filterServiceList(&v.Services)
+
+	case *structs.GatewayServices:
+		filt.filterGatewayServices(v)
+
 	default:
 		panic(fmt.Errorf("Unhandled type passed to ACL filter: %T %#v", subj, subj))
 	}

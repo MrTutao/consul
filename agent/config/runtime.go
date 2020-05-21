@@ -569,6 +569,10 @@ type RuntimeConfig struct {
 	// ConnectCAConfig is the config to use for the CA provider.
 	ConnectCAConfig map[string]interface{}
 
+	// ConnectMeshGatewayWANFederationEnabled determines if wan federation of
+	// datacenters should exclusively traverse mesh gateways.
+	ConnectMeshGatewayWANFederationEnabled bool
+
 	// ConnectTestCALeafRootChangeSpread is used to control how long the CA leaf
 	// cache with spread CSRs over when a root change occurs. For now we don't
 	// expose this in public config intentionally but could later with a rename.
@@ -806,7 +810,7 @@ type RuntimeConfig struct {
 	// HTTPMaxConnsPerClient limits the number of concurrent TCP connections the
 	// HTTP(S) server will accept from any single source IP address.
 	//
-	// hcl: limits{ http_max_conns_per_client = 100 }
+	// hcl: limits{ http_max_conns_per_client = 200 }
 	HTTPMaxConnsPerClient int
 
 	// HTTPSHandshakeTimeout is the time allowed for HTTPS client to complete the
@@ -926,6 +930,22 @@ type RuntimeConfig struct {
 	// hcl: primary_datacenter = string
 	PrimaryDatacenter string
 
+	// PrimaryGateways is a list of addresses and/or go-discover expressions to
+	// discovery the mesh gateways in the primary datacenter. See
+	// https://www.consul.io/docs/agent/options.html#cloud-auto-joining for
+	// details.
+	//
+	// hcl: primary_gateways = []string
+	// flag: -primary-gateway string -primary-gateway string
+	PrimaryGateways []string
+
+	// PrimaryGatewaysInterval specifies the amount of time to wait in between discovery
+	// attempts on agent start. The minimum allowed value is 1 second and
+	// the default is 30s.
+	//
+	// hcl: primary_gateways_interval = "duration"
+	PrimaryGatewaysInterval time.Duration
+
 	// RPCAdvertiseAddr is the TCP address Consul advertises for its RPC endpoint.
 	// By default this is the bind address on the default RPC Server port. If the
 	// advertise address is specified then it is used.
@@ -1041,14 +1061,14 @@ type RuntimeConfig struct {
 	// attempts on agent start. The minimum allowed value is 1 second and
 	// the default is 30s.
 	//
-	// hcl: retry_join = "duration"
+	// hcl: retry_interval = "duration"
 	RetryJoinIntervalLAN time.Duration
 
 	// RetryJoinIntervalWAN specifies the amount of time to wait in between join
 	// attempts on agent start. The minimum allowed value is 1 second and
 	// the default is 30s.
 	//
-	// hcl: retry_join_wan = "duration"
+	// hcl: retry_interval_wan = "duration"
 	RetryJoinIntervalWAN time.Duration
 
 	// RetryJoinLAN is a list of addresses and/or go-discover expressions to
@@ -1132,6 +1152,18 @@ type RuntimeConfig struct {
 	//
 	// hcl: bind_addr = string advertise_addr_wan = string ports { serf_wan = int }
 	SerfAdvertiseAddrWAN *net.TCPAddr
+
+	// SerfAllowedCIDRsLAN if set to a non-empty value, will restrict which networks
+	// are allowed to connect to Serf on the LAN.
+	// hcl: serf_lan_allowed_cidrs = []string
+	// flag: serf-lan-allowed-cidrs string (can be specified multiple times)
+	SerfAllowedCIDRsLAN []net.IPNet
+
+	// SerfAllowedCIDRsWAN if set to a non-empty value, will restrict which networks
+	// are allowed to connect to Serf on the WAN.
+	// hcl: serf_wan_allowed_cidrs = []string
+	// flag: serf-wan-allowed-cidrs string (can be specified multiple times)
+	SerfAllowedCIDRsWAN []net.IPNet
 
 	// SerfBindAddrLAN is the address to bind the Serf LAN TCP and UDP
 	// listeners to. The ip address is either the default bind address or the
@@ -1392,28 +1424,16 @@ type RuntimeConfig struct {
 	//
 	// The values should be a list of the following values:
 	//
-	//   TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
-	//   TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
-	//   TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
-	//   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
-	//   TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
-	//   TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
-	//   TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256
-	//   TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
-	//   TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256
 	//   TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
-	//   TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+	//   TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256
+	//   TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
 	//   TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
-	//   TLS_RSA_WITH_AES_128_GCM_SHA256
-	//   TLS_RSA_WITH_AES_256_GCM_SHA384
-	//   TLS_RSA_WITH_AES_128_CBC_SHA256
-	//   TLS_RSA_WITH_AES_128_CBC_SHA
-	//   TLS_RSA_WITH_AES_256_CBC_SHA
-	//   TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA
-	//   TLS_RSA_WITH_3DES_EDE_CBC_SHA
-	//   TLS_RSA_WITH_RC4_128_SHA
-	//   TLS_ECDHE_RSA_WITH_RC4_128_SHA
-	//   TLS_ECDHE_ECDSA_WITH_RC4_128_SHA
+	//   TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+	//   TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+	//   TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256
+	//   TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+	//   TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+	//   TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
 	//
 	// todo(fs): IMHO, we should also support the raw 0xNNNN values from
 	// todo(fs): https://golang.org/pkg/crypto/tls/#pkg-constants
@@ -1423,7 +1443,8 @@ type RuntimeConfig struct {
 	TLSCipherSuites []uint16
 
 	// TLSMinVersion is used to set the minimum TLS version used for TLS
-	// connections. Should be either "tls10", "tls11", or "tls12".
+	// connections. Should be either "tls10", "tls11", "tls12" or "tls13".
+	// Defaults to tls12.
 	//
 	// hcl: tls_min_version = string
 	TLSMinVersion string
@@ -1450,6 +1471,12 @@ type RuntimeConfig struct {
 	//
 	// hcl: translate_wan_addrs = (true|false)
 	TranslateWANAddrs bool
+
+	// TxnMaxReqLen configures the upper limit for the size (in bytes) of the
+	// incoming request bodies for transactions to the /txn endpoint.
+	//
+	// hcl: limits { txn_max_req_len = uint64 }
+	TxnMaxReqLen uint64
 
 	// UIDir is the directory containing the Web UI resources.
 	// If provided, the UI endpoints will be enabled.
@@ -1778,7 +1805,15 @@ func sanitize(name string, v reflect.Value) reflect.Value {
 		return reflect.ValueOf(m)
 
 	case isArray(typ) || isSlice(typ):
-		ma := make([]interface{}, 0)
+		ma := make([]interface{}, 0, v.Len())
+		if strings.HasPrefix(name, "SerfAllowedCIDRs") {
+			for i := 0; i < v.Len(); i++ {
+				addr := v.Index(i).Addr()
+				ip := addr.Interface().(*net.IPNet)
+				ma = append(ma, ip.String())
+			}
+			return reflect.ValueOf(ma)
+		}
 		for i := 0; i < v.Len(); i++ {
 			ma = append(ma, sanitize(fmt.Sprintf("%s[%d]", name, i), v.Index(i)).Interface())
 		}

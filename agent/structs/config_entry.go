@@ -15,11 +15,13 @@ import (
 )
 
 const (
-	ServiceDefaults string = "service-defaults"
-	ProxyDefaults   string = "proxy-defaults"
-	ServiceRouter   string = "service-router"
-	ServiceSplitter string = "service-splitter"
-	ServiceResolver string = "service-resolver"
+	ServiceDefaults    string = "service-defaults"
+	ProxyDefaults      string = "proxy-defaults"
+	ServiceRouter      string = "service-router"
+	ServiceSplitter    string = "service-splitter"
+	ServiceResolver    string = "service-resolver"
+	IngressGateway     string = "ingress-gateway"
+	TerminatingGateway string = "terminating-gateway"
 
 	ProxyConfigGlobal string = "global"
 
@@ -338,10 +340,15 @@ func ConfigEntryDecodeRulesForKind(kind string) (skipWhenPatching []string, tran
 				"config":          "",
 			}, nil
 	case ServiceDefaults:
-		return nil, map[string]string{
-			"mesh_gateway": "meshgateway",
-			"external_sni": "externalsni",
-		}, nil
+		return []string{
+				"expose.paths",
+				"Expose.Paths",
+			}, map[string]string{
+				"local_path_port": "localpathport",
+				"listener_port":   "listenerport",
+				"mesh_gateway":    "meshgateway",
+				"external_sni":    "externalsni",
+			}, nil
 	case ServiceRouter:
 		return []string{
 				"routes",
@@ -376,6 +383,22 @@ func ConfigEntryDecodeRulesForKind(kind string) (skipWhenPatching []string, tran
 			"only_passing":    "onlypassing",
 			"service_subset":  "servicesubset",
 		}, nil
+	case IngressGateway:
+		return []string{
+			"listeners",
+			"Listeners",
+			"listeners.services",
+			"Listeners.Services",
+		}, nil, nil
+	case TerminatingGateway:
+		return []string{
+				"services",
+				"Services",
+			}, map[string]string{
+				"ca_file":   "cafile",
+				"cert_file": "certfile",
+				"key_file":  "keyfile",
+			}, nil
 	default:
 		return nil, nil, fmt.Errorf("kind %q should be explicitly handled here", kind)
 	}
@@ -466,6 +489,10 @@ func MakeConfigEntry(kind, name string) (ConfigEntry, error) {
 		return &ServiceSplitterConfigEntry{Name: name}, nil
 	case ServiceResolver:
 		return &ServiceResolverConfigEntry{Name: name}, nil
+	case IngressGateway:
+		return &IngressGatewayConfigEntry{Name: name}, nil
+	case TerminatingGateway:
+		return &TerminatingGatewayConfigEntry{Name: name}, nil
 	default:
 		return nil, fmt.Errorf("invalid config entry kind: %s", kind)
 	}
@@ -476,6 +503,8 @@ func ValidateConfigEntryKind(kind string) bool {
 	case ServiceDefaults, ProxyDefaults:
 		return true
 	case ServiceRouter, ServiceSplitter, ServiceResolver:
+		return true
+	case IngressGateway, TerminatingGateway:
 		return true
 	default:
 		return false

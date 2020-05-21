@@ -85,12 +85,30 @@ func (s *HTTPServer) AgentSelf(resp http.ResponseWriter, req *http.Request) (int
 	}, nil
 }
 
+// acceptsOpenMetricsMimeType returns true if mime type is Prometheus-compatible
+func acceptsOpenMetricsMimeType(acceptHeader string) bool {
+	mimeTypes := strings.Split(acceptHeader, ",")
+	for _, v := range mimeTypes {
+		mimeInfo := strings.Split(v, ";")
+		if len(mimeInfo) > 0 {
+			rawMime := strings.ToLower(strings.Trim(mimeInfo[0], " "))
+			if rawMime == "application/openmetrics-text" {
+				return true
+			}
+			if rawMime == "text/plain" && (len(mimeInfo) > 1 && strings.Trim(mimeInfo[1], " ") == "version=0.4.0") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // enablePrometheusOutput will look for Prometheus mime-type or format Query parameter the same way as Nomad
 func enablePrometheusOutput(req *http.Request) bool {
 	if format := req.URL.Query().Get("format"); format == "prometheus" {
 		return true
 	}
-	return false
+	return acceptsOpenMetricsMimeType(req.Header.Get("Accept"))
 }
 
 func (s *HTTPServer) AgentMetrics(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -192,9 +210,7 @@ func buildAgentService(s *structs.NodeService) api.AgentService {
 		as.Meta = map[string]string{}
 	}
 	// Attach Proxy config if exists
-	if s.Kind == structs.ServiceKindConnectProxy ||
-		s.Kind == structs.ServiceKindMeshGateway {
-
+	if s.Kind == structs.ServiceKindConnectProxy || s.IsGateway() {
 		as.Proxy = s.Proxy.ToAPI()
 	}
 
@@ -443,7 +459,11 @@ func (s *HTTPServer) AgentJoin(resp http.ResponseWriter, req *http.Request) (int
 
 	// Get the address
 	addr := strings.TrimPrefix(req.URL.Path, "/v1/agent/join/")
+
 	if wan {
+		if s.agent.config.ConnectMeshGatewayWANFederationEnabled {
+			return nil, fmt.Errorf("WAN join is disabled when wan federation via mesh gateways is enabled")
+		}
 		_, err = s.agent.JoinWAN([]string{addr})
 	} else {
 		_, err = s.agent.JoinLAN([]string{addr})
@@ -747,8 +767,7 @@ func (s *HTTPServer) AgentHealthServiceByID(resp http.ResponseWriter, req *http.
 		return nil, err
 	}
 
-	var sid structs.ServiceID
-	sid.Init(serviceID, &entMeta)
+	sid := structs.NewServiceID(serviceID, &entMeta)
 
 	if service := s.agent.State.Service(sid); service != nil {
 		if authz != nil && authz.ServiceRead(service.Service, &authzContext) != acl.Allow {
@@ -810,8 +829,7 @@ func (s *HTTPServer) AgentHealthServiceByName(resp http.ResponseWriter, req *htt
 	result := make([]api.AgentServiceChecksInfo, 0, 16)
 	for _, service := range services {
 		if service.Service == serviceName {
-			var sid structs.ServiceID
-			sid.Init(service.ID, &entMeta)
+			sid := structs.NewServiceID(service.ID, &entMeta)
 
 			scode, sstatus, healthChecks := agentHealthService(sid, s)
 			serviceInfo := buildAgentService(service)
@@ -886,7 +904,7 @@ func (s *HTTPServer) AgentRegisterService(resp http.ResponseWriter, req *http.Re
 			return nil, nil
 		}
 	}
-	if err := structs.ValidateMetadata(ns.Meta, false); err != nil {
+	if err := structs.ValidateServiceMetadata(ns.Kind, ns.Meta, false); err != nil {
 		resp.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(resp, fmt.Errorf("Invalid Service Meta: %v", err))
 		return nil, nil
@@ -896,7 +914,7 @@ func (s *HTTPServer) AgentRegisterService(resp http.ResponseWriter, req *http.Re
 	// the catalog endpoint so it helps ensure the sync will work properly.
 	if err := ns.Validate(); err != nil {
 		resp.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(resp, err.Error())
+		fmt.Fprint(resp, err.Error())
 		return nil, nil
 	}
 

@@ -35,6 +35,7 @@ import (
 	connlimit "github.com/hashicorp/go-connlimit"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-memdb"
+	"github.com/hashicorp/memberlist"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 	"github.com/hashicorp/serf/serf"
@@ -90,17 +91,20 @@ const (
 )
 
 const (
-	legacyACLReplicationRoutineName    = "legacy ACL replication"
-	aclPolicyReplicationRoutineName    = "ACL policy replication"
-	aclRoleReplicationRoutineName      = "ACL role replication"
-	aclTokenReplicationRoutineName     = "ACL token replication"
-	aclTokenReapingRoutineName         = "acl token reaping"
-	aclUpgradeRoutineName              = "legacy ACL token upgrade"
-	caRootPruningRoutineName           = "CA root pruning"
-	configReplicationRoutineName       = "config entry replication"
-	intentionReplicationRoutineName    = "intention replication"
-	secondaryCARootWatchRoutineName    = "secondary CA roots watch"
-	secondaryCertRenewWatchRoutineName = "secondary cert renew watch"
+	legacyACLReplicationRoutineName       = "legacy ACL replication"
+	aclPolicyReplicationRoutineName       = "ACL policy replication"
+	aclRoleReplicationRoutineName         = "ACL role replication"
+	aclTokenReplicationRoutineName        = "ACL token replication"
+	aclTokenReapingRoutineName            = "acl token reaping"
+	aclUpgradeRoutineName                 = "legacy ACL token upgrade"
+	caRootPruningRoutineName              = "CA root pruning"
+	configReplicationRoutineName          = "config entry replication"
+	federationStateReplicationRoutineName = "federation state replication"
+	federationStateAntiEntropyRoutineName = "federation state anti-entropy"
+	federationStatePruningRoutineName     = "federation state pruning"
+	intentionReplicationRoutineName       = "intention replication"
+	secondaryCARootWatchRoutineName       = "secondary CA roots watch"
+	secondaryCertRenewWatchRoutineName    = "secondary cert renew watch"
 )
 
 var (
@@ -152,6 +156,10 @@ type Server struct {
 	// configReplicator is used to manage the leaders replication routines for
 	// centralized config
 	configReplicator *Replicator
+
+	// federationStateReplicator is used to manage the leaders replication routines for
+	// federation states
+	federationStateReplicator *Replicator
 
 	// tokens holds ACL tokens initially from the configuration, but can
 	// be updated at runtime, so should always be used instead of going to
@@ -240,7 +248,9 @@ type Server struct {
 
 	// serfWAN is the Serf cluster maintained between DC's
 	// which SHOULD only consist of Consul servers
-	serfWAN *serf.Serf
+	serfWAN                *serf.Serf
+	memberlistTransportWAN memberlist.IngestionAwareTransport
+	gatewayLocator         *GatewayLocator
 
 	// serverLookup tracks server consuls in the local datacenter.
 	// Used to do leader forwarding and provide fast lookup by server id and address
@@ -358,12 +368,14 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 	shutdownCh := make(chan struct{})
 
 	connPool := &pool.ConnPool{
+		Server:          true,
 		SrcAddr:         config.RPCSrcAddr,
 		LogOutput:       config.LogOutput,
 		MaxTime:         serverRPCCache,
 		MaxStreams:      serverMaxStreams,
 		TLSConfigurator: tlsConfigurator,
 		ForceTLS:        config.VerifyOutgoing,
+		Datacenter:      config.Datacenter,
 	}
 
 	serverLogger := logger.NamedIntercept(logging.ConsulServer)
@@ -379,7 +391,7 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 		loggers:                 loggers,
 		leaveCh:                 make(chan struct{}),
 		reconcileCh:             make(chan serf.Member, reconcileChSize),
-		router:                  router.NewRouter(serverLogger, config.Datacenter),
+		router:                  router.NewRouter(serverLogger, config.Datacenter, fmt.Sprintf("%s.%s", config.NodeName, config.Datacenter)),
 		rpcServer:               rpc.NewServer(),
 		insecureRPCServer:       rpc.NewServer(),
 		tlsConfigurator:         tlsConfigurator,
@@ -391,6 +403,16 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 		shutdownCh:              shutdownCh,
 		leaderRoutineManager:    NewLeaderRoutineManager(logger),
 		aclAuthMethodValidators: authmethod.NewCache(),
+	}
+
+	if s.config.ConnectMeshGatewayWANFederationEnabled {
+		s.gatewayLocator = NewGatewayLocator(
+			s.logger,
+			s,
+			s.config.Datacenter,
+			s.config.PrimaryDatacenter,
+		)
+		s.connPool.GatewayResolver = s.gatewayLocator.PickGateway
 	}
 
 	// Initialize enterprise specific server functionality
@@ -409,6 +431,22 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 		Logger:   s.logger,
 	}
 	s.configReplicator, err = NewReplicator(&configReplicatorConfig)
+	if err != nil {
+		s.Shutdown()
+		return nil, err
+	}
+
+	federationStateReplicatorConfig := ReplicatorConfig{
+		Name: logging.FederationState,
+		Delegate: &IndexReplicator{
+			Delegate: &FederationStateReplicator{srv: s},
+			Logger:   s.logger,
+		},
+		Rate:   s.config.FederationStateReplicationRate,
+		Burst:  s.config.FederationStateReplicationBurst,
+		Logger: logger,
+	}
+	s.federationStateReplicator, err = NewReplicator(&federationStateReplicatorConfig)
 	if err != nil {
 		s.Shutdown()
 		return nil, err
@@ -456,6 +494,10 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 		go s.trackAutoEncryptCARoots()
 	}
 
+	if s.gatewayLocator != nil {
+		go s.gatewayLocator.Run(s.shutdownCh)
+	}
+
 	// Serf and dynamic bind ports
 	//
 	// The LAN serf cluster announces the port of the WAN serf cluster
@@ -474,6 +516,11 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 			s.Shutdown()
 			return nil, fmt.Errorf("Failed to start WAN Serf: %v", err)
 		}
+
+		// This is always a *memberlist.NetTransport or something which wraps
+		// it which satisfies this interface.
+		s.memberlistTransportWAN = config.SerfWANConfig.MemberlistConfig.Transport.(memberlist.IngestionAwareTransport)
+
 		// See big comment above why we are doing this.
 		if serfBindPortWAN == 0 {
 			serfBindPortWAN = config.SerfWANConfig.MemberlistConfig.BindPort
@@ -504,20 +551,24 @@ func NewServerLogger(config *Config, logger hclog.InterceptLogger, tokens *token
 
 	// Add a "static route" to the WAN Serf and hook it up to Serf events.
 	if s.serfWAN != nil {
-		if err := s.router.AddArea(types.AreaWAN, s.serfWAN, s.connPool, s.config.VerifyOutgoing); err != nil {
+		if err := s.router.AddArea(types.AreaWAN, s.serfWAN, s.connPool); err != nil {
 			s.Shutdown()
 			return nil, fmt.Errorf("Failed to add WAN serf route: %v", err)
 		}
 		go router.HandleSerfEvents(s.logger, s.router, types.AreaWAN, s.serfWAN.ShutdownCh(), s.eventChWAN)
 
 		// Fire up the LAN <-> WAN join flooder.
-		portFn := func(s *metadata.Server) (int, bool) {
-			if s.WanJoinPort > 0 {
-				return s.WanJoinPort, true
+		addrFn := func(s *metadata.Server) (string, error) {
+			if s.WanJoinPort == 0 {
+				return "", fmt.Errorf("no wan join  port for server: %s", s.Addr.String())
 			}
-			return 0, false
+			addr, _, err := net.SplitHostPort(s.Addr.String())
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%s:%d", addr, s.WanJoinPort), nil
 		}
-		go s.Flood(nil, portFn, s.serfWAN)
+		go s.Flood(addrFn, s.serfWAN)
 	}
 
 	// Start enterprise specific functionality
@@ -777,6 +828,7 @@ func (s *Server) setupRPC() error {
 		return err
 	}
 	s.Listener = ln
+
 	if s.config.NotifyListen != nil {
 		s.config.NotifyListen()
 	}
@@ -791,23 +843,16 @@ func (s *Server) setupRPC() error {
 		return fmt.Errorf("RPC advertise address is not advertisable: %v", s.config.RPCAdvertise)
 	}
 
+	// TODO (hans) switch NewRaftLayer to tlsConfigurator
+
 	// Provide a DC specific wrapper. Raft replication is only
 	// ever done in the same datacenter, so we can provide it as a constant.
 	wrapper := tlsutil.SpecificDC(s.config.Datacenter, s.tlsConfigurator.OutgoingRPCWrapper())
 
 	// Define a callback for determining whether to wrap a connection with TLS
 	tlsFunc := func(address raft.ServerAddress) bool {
-		if s.config.VerifyOutgoing {
-			return true
-		}
-
-		server := s.serverLookup.Server(address)
-
-		if server == nil {
-			return false
-		}
-
-		return server.UseTLS
+		// raft only talks to its own datacenter
+		return s.tlsConfigurator.UseTLS(s.config.Datacenter)
 	}
 	s.raftLayer = NewRaftLayer(s.config.RPCSrcAddr, s.config.RPCAdvertise, wrapper, tlsFunc)
 	return nil
@@ -1012,6 +1057,41 @@ func (s *Server) JoinWAN(addrs []string) (int, error) {
 	return s.serfWAN.Join(addrs, true)
 }
 
+// PrimaryMeshGatewayAddressesReadyCh returns a channel that will be closed
+// when federation state replication ships back at least one primary mesh
+// gateway (not via fallback config).
+func (s *Server) PrimaryMeshGatewayAddressesReadyCh() <-chan struct{} {
+	if s.gatewayLocator == nil {
+		return nil
+	}
+	return s.gatewayLocator.PrimaryMeshGatewayAddressesReadyCh()
+}
+
+// PickRandomMeshGatewaySuitableForDialing is a convenience function used for writing tests.
+func (s *Server) PickRandomMeshGatewaySuitableForDialing(dc string) string {
+	if s.gatewayLocator == nil {
+		return ""
+	}
+	return s.gatewayLocator.PickGateway(dc)
+}
+
+// RefreshPrimaryGatewayFallbackAddresses is used to update the list of current
+// fallback addresses for locating mesh gateways in the primary datacenter.
+func (s *Server) RefreshPrimaryGatewayFallbackAddresses(addrs []string) {
+	if s.gatewayLocator != nil {
+		s.gatewayLocator.RefreshPrimaryGatewayFallbackAddresses(addrs)
+	}
+}
+
+// PrimaryGatewayFallbackAddresses returns the current set of discovered
+// fallback addresses for the mesh gateways in the primary datacenter.
+func (s *Server) PrimaryGatewayFallbackAddresses() []string {
+	if s.gatewayLocator == nil {
+		return nil
+	}
+	return s.gatewayLocator.PrimaryGatewayFallbackAddresses()
+}
+
 // LocalMember is used to return the local node
 func (s *Server) LocalMember() serf.Member {
 	return s.serfLAN.LocalMember()
@@ -1060,6 +1140,12 @@ func (s *Server) IsLeader() bool {
 	return s.raft.State() == raft.Leader
 }
 
+// LeaderLastContact returns the time of last contact by a leader.
+// This only makes sense if we are currently a follower.
+func (s *Server) LeaderLastContact() time.Time {
+	return s.raft.LastContact()
+}
+
 // KeyManagerLAN returns the LAN Serf keyring manager
 func (s *Server) KeyManagerLAN() *serf.KeyManager {
 	return s.serfLAN.KeyManager()
@@ -1068,15 +1154,6 @@ func (s *Server) KeyManagerLAN() *serf.KeyManager {
 // KeyManagerWAN returns the WAN Serf keyring manager
 func (s *Server) KeyManagerWAN() *serf.KeyManager {
 	return s.serfWAN.KeyManager()
-}
-
-// Encrypted determines if gossip is encrypted
-func (s *Server) Encrypted() bool {
-	LANEncrypted := s.serfLAN.EncryptionEnabled()
-	if s.serfWAN == nil {
-		return LANEncrypted
-	}
-	return LANEncrypted && s.serfWAN.EncryptionEnabled()
 }
 
 // LANSegments returns a map of LAN segments by name
@@ -1281,6 +1358,7 @@ func (s *Server) ReloadConfig(config *Config) error {
 		// this will error if we lose leadership while bootstrapping here.
 		return s.bootstrapConfigEntries(config.ConfigEntryBootstrap)
 	}
+
 	return nil
 }
 

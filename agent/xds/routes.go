@@ -15,14 +15,16 @@ import (
 
 // routesFromSnapshot returns the xDS API representation of the "routes" in the
 // snapshot.
-func routesFromSnapshot(cfgSnap *proxycfg.ConfigSnapshot, token string) ([]proto.Message, error) {
+func routesFromSnapshot(cfgSnap *proxycfg.ConfigSnapshot, _ string) ([]proto.Message, error) {
 	if cfgSnap == nil {
 		return nil, errors.New("nil config given")
 	}
 
 	switch cfgSnap.Kind {
 	case structs.ServiceKindConnectProxy:
-		return routesFromSnapshotConnectProxy(cfgSnap, token)
+		return routesFromSnapshotConnectProxy(cfgSnap)
+	case structs.ServiceKindIngressGateway:
+		return routesFromSnapshotIngressGateway(cfgSnap)
 	default:
 		return nil, fmt.Errorf("Invalid service kind: %v", cfgSnap.Kind)
 	}
@@ -30,13 +32,12 @@ func routesFromSnapshot(cfgSnap *proxycfg.ConfigSnapshot, token string) ([]proto
 
 // routesFromSnapshotConnectProxy returns the xDS API representation of the
 // "routes" in the snapshot.
-func routesFromSnapshotConnectProxy(cfgSnap *proxycfg.ConfigSnapshot, token string) ([]proto.Message, error) {
+func routesFromSnapshotConnectProxy(cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
 	if cfgSnap == nil {
 		return nil, errors.New("nil config given")
 	}
 
 	var resources []proto.Message
-
 	for _, u := range cfgSnap.Proxy.Upstreams {
 		upstreamID := u.Identifier()
 
@@ -48,29 +49,92 @@ func routesFromSnapshotConnectProxy(cfgSnap *proxycfg.ConfigSnapshot, token stri
 		if chain == nil || chain.IsDefault() {
 			// TODO(rb): make this do the old school stuff too
 		} else {
-			upstreamRoute, err := makeUpstreamRouteForDiscoveryChain(&u, chain, cfgSnap)
+			virtualHost, err := makeUpstreamRouteForDiscoveryChain(upstreamID, chain, []string{"*"})
 			if err != nil {
 				return nil, err
 			}
-			if upstreamRoute != nil {
-				resources = append(resources, upstreamRoute)
+
+			route := &envoy.RouteConfiguration{
+				Name:         upstreamID,
+				VirtualHosts: []envoyroute.VirtualHost{virtualHost},
+				// ValidateClusters defaults to true when defined statically and false
+				// when done via RDS. Re-set the sane value of true to prevent
+				// null-routing traffic.
+				ValidateClusters: makeBoolValue(true),
 			}
+			resources = append(resources, route)
 		}
 	}
 
 	// TODO(rb): make sure we don't generate an empty result
-
 	return resources, nil
 }
 
-func makeUpstreamRouteForDiscoveryChain(
-	u *structs.Upstream,
-	chain *structs.CompiledDiscoveryChain,
-	cfgSnap *proxycfg.ConfigSnapshot,
-) (*envoy.RouteConfiguration, error) {
-	upstreamID := u.Identifier()
-	routeName := upstreamID
+// routesFromSnapshotIngressGateway returns the xDS API representation of the
+// "routes" in the snapshot.
+func routesFromSnapshotIngressGateway(cfgSnap *proxycfg.ConfigSnapshot) ([]proto.Message, error) {
+	if cfgSnap == nil {
+		return nil, errors.New("nil config given")
+	}
 
+	var result []proto.Message
+	for listenerKey, upstreams := range cfgSnap.IngressGateway.Upstreams {
+		// Do not create any route configuration for TCP listeners
+		if listenerKey.Protocol == "tcp" {
+			continue
+		}
+
+		upstreamRoute := &envoy.RouteConfiguration{
+			Name: listenerKey.RouteName(),
+			// ValidateClusters defaults to true when defined statically and false
+			// when done via RDS. Re-set the sane value of true to prevent
+			// null-routing traffic.
+			ValidateClusters: makeBoolValue(true),
+		}
+		for _, u := range upstreams {
+			upstreamID := u.Identifier()
+			chain := cfgSnap.IngressGateway.DiscoveryChain[upstreamID]
+			if chain == nil {
+				continue
+			}
+
+			namespace := u.GetEnterpriseMeta().NamespaceOrDefault()
+			var domains []string
+			switch {
+			case len(upstreams) == 1:
+				// Don't require a service prefix on the domain if there is only 1
+				// upstream. This makes it a smoother experience when only having a
+				// single service associated to a listener, which is probably a common
+				// case when demoing/testing
+				domains = []string{"*"}
+			case len(u.IngressHosts) > 0:
+				// If a user has specified hosts, do not add the default
+				// "<service-name>.*" prefix
+				domains = u.IngressHosts
+			case namespace != structs.IntentionDefaultNamespace:
+				domains = []string{fmt.Sprintf("%s.ingress.%s.*", chain.ServiceName, namespace)}
+			default:
+				domains = []string{fmt.Sprintf("%s.*", chain.ServiceName)}
+			}
+
+			virtualHost, err := makeUpstreamRouteForDiscoveryChain(upstreamID, chain, domains)
+			if err != nil {
+				return nil, err
+			}
+			upstreamRoute.VirtualHosts = append(upstreamRoute.VirtualHosts, virtualHost)
+		}
+
+		result = append(result, upstreamRoute)
+	}
+
+	return result, nil
+}
+
+func makeUpstreamRouteForDiscoveryChain(
+	routeName string,
+	chain *structs.CompiledDiscoveryChain,
+	serviceDomains []string,
+) (envoyroute.VirtualHost, error) {
 	var routes []envoyroute.Route
 
 	startNode := chain.Nodes[chain.StartNode]
@@ -93,16 +157,16 @@ func makeUpstreamRouteForDiscoveryChain(
 			nextNode := chain.Nodes[discoveryRoute.NextNode]
 			switch nextNode.Type {
 			case structs.DiscoveryGraphNodeTypeSplitter:
-				routeAction, err = makeRouteActionForSplitter(nextNode.Splits, chain, cfgSnap)
+				routeAction, err = makeRouteActionForSplitter(nextNode.Splits, chain)
 				if err != nil {
-					return nil, err
+					return envoyroute.VirtualHost{}, err
 				}
 
 			case structs.DiscoveryGraphNodeTypeResolver:
-				routeAction = makeRouteActionForSingleCluster(nextNode.Resolver.Target, chain, cfgSnap)
+				routeAction = makeRouteActionForSingleCluster(nextNode.Resolver.Target, chain)
 
 			default:
-				return nil, fmt.Errorf("unexpected graph node after route %q", nextNode.Type)
+				return envoyroute.VirtualHost{}, fmt.Errorf("unexpected graph node after route %q", nextNode.Type)
 			}
 
 			// TODO(rb): Better help handle the envoy case where you need (prefix=/foo/,rewrite=/) and (exact=/foo,rewrite=/) to do a full rewrite
@@ -129,7 +193,7 @@ func makeUpstreamRouteForDiscoveryChain(
 					}
 					if len(destination.RetryOnStatusCodes) > 0 {
 						if retryPolicy.RetryOn != "" {
-							retryPolicy.RetryOn = ",retriable-status-codes"
+							retryPolicy.RetryOn = retryPolicy.RetryOn + ",retriable-status-codes"
 						} else {
 							retryPolicy.RetryOn = "retriable-status-codes"
 						}
@@ -147,9 +211,9 @@ func makeUpstreamRouteForDiscoveryChain(
 		}
 
 	case structs.DiscoveryGraphNodeTypeSplitter:
-		routeAction, err := makeRouteActionForSplitter(startNode.Splits, chain, cfgSnap)
+		routeAction, err := makeRouteActionForSplitter(startNode.Splits, chain)
 		if err != nil {
-			return nil, err
+			return envoyroute.VirtualHost{}, err
 		}
 
 		defaultRoute := envoyroute.Route{
@@ -160,7 +224,7 @@ func makeUpstreamRouteForDiscoveryChain(
 		routes = []envoyroute.Route{defaultRoute}
 
 	case structs.DiscoveryGraphNodeTypeResolver:
-		routeAction := makeRouteActionForSingleCluster(startNode.Resolver.Target, chain, cfgSnap)
+		routeAction := makeRouteActionForSingleCluster(startNode.Resolver.Target, chain)
 
 		defaultRoute := envoyroute.Route{
 			Match:  makeDefaultRouteMatch(),
@@ -173,20 +237,13 @@ func makeUpstreamRouteForDiscoveryChain(
 		panic("unknown first node in discovery chain of type: " + startNode.Type)
 	}
 
-	return &envoy.RouteConfiguration{
-		Name: routeName,
-		VirtualHosts: []envoyroute.VirtualHost{
-			envoyroute.VirtualHost{
-				Name:    routeName,
-				Domains: []string{"*"},
-				Routes:  routes,
-			},
-		},
-		// ValidateClusters defaults to true when defined statically and false
-		// when done via RDS. Re-set the sane value of true to prevent
-		// null-routing traffic.
-		ValidateClusters: makeBoolValue(true),
-	}, nil
+	host := envoyroute.VirtualHost{
+		Name:    routeName,
+		Domains: serviceDomains,
+		Routes:  routes,
+	}
+
+	return host, nil
 }
 
 func makeRouteMatchForDiscoveryRoute(discoveryRoute *structs.DiscoveryRoute, protocol string) envoyroute.RouteMatch {
@@ -307,7 +364,7 @@ func makeDefaultRouteMatch() envoyroute.RouteMatch {
 	}
 }
 
-func makeRouteActionForSingleCluster(targetID string, chain *structs.CompiledDiscoveryChain, cfgSnap *proxycfg.ConfigSnapshot) *envoyroute.Route_Route {
+func makeRouteActionForSingleCluster(targetID string, chain *structs.CompiledDiscoveryChain) *envoyroute.Route_Route {
 	target := chain.Targets[targetID]
 
 	clusterName := CustomizeClusterName(target.Name, chain)
@@ -321,7 +378,7 @@ func makeRouteActionForSingleCluster(targetID string, chain *structs.CompiledDis
 	}
 }
 
-func makeRouteActionForSplitter(splits []*structs.DiscoverySplit, chain *structs.CompiledDiscoveryChain, cfgSnap *proxycfg.ConfigSnapshot) (*envoyroute.Route_Route, error) {
+func makeRouteActionForSplitter(splits []*structs.DiscoverySplit, chain *structs.CompiledDiscoveryChain) (*envoyroute.Route_Route, error) {
 	clusters := make([]*envoyroute.WeightedCluster_ClusterWeight, 0, len(splits))
 	for _, split := range splits {
 		nextNode := chain.Nodes[split.NextNode]

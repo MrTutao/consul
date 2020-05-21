@@ -2,7 +2,9 @@ package xds
 
 import (
 	"testing"
+	"time"
 
+	"github.com/hashicorp/consul/agent/structs"
 	"github.com/stretchr/testify/require"
 )
 
@@ -243,10 +245,117 @@ func TestParseUpstreamConfig(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "passive health check map",
+			input: map[string]interface{}{
+				"passive_health_check": map[string]interface{}{
+					"interval":     "22s",
+					"max_failures": 7,
+				},
+			},
+			want: UpstreamConfig{
+				ConnectTimeoutMs: 5000,
+				Protocol:         "tcp",
+				PassiveHealthCheck: PassiveHealthCheck{
+					Interval:    22 * time.Second,
+					MaxFailures: 7,
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseUpstreamConfig(tt.input)
+			require.NoError(t, err)
+			require.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestParseGatewayConfig(t *testing.T) {
+	tests := []struct {
+		name  string
+		input map[string]interface{}
+		want  GatewayConfig
+	}{
+		{
+			name:  "defaults - nil",
+			input: nil,
+			want: GatewayConfig{
+				ConnectTimeoutMs: 5000,
+			},
+		},
+		{
+			name:  "defaults - empty",
+			input: map[string]interface{}{},
+			want: GatewayConfig{
+				ConnectTimeoutMs: 5000,
+			},
+		},
+		{
+			name: "defaults - other stuff",
+			input: map[string]interface{}{
+				"foo":       "bar",
+				"envoy_foo": "envoy_bar",
+			},
+			want: GatewayConfig{
+				ConnectTimeoutMs: 5000,
+			},
+		},
+		{
+			name: "kitchen sink",
+			input: map[string]interface{}{
+				"envoy_gateway_bind_tagged_addresses": true,
+				"envoy_gateway_bind_addresses":        map[string]structs.ServiceAddress{"foo": {Address: "127.0.0.1", Port: 80}},
+				"envoy_gateway_no_default_bind":       true,
+				"connect_timeout_ms":                  10,
+			},
+			want: GatewayConfig{
+				ConnectTimeoutMs:    10,
+				BindTaggedAddresses: true,
+				NoDefaultBind:       true,
+				BindAddresses:       map[string]structs.ServiceAddress{"foo": {Address: "127.0.0.1", Port: 80}},
+			},
+		},
+		{
+			name: "deprecated kitchen sink",
+			input: map[string]interface{}{
+				"envoy_mesh_gateway_bind_tagged_addresses": true,
+				"envoy_mesh_gateway_bind_addresses":        map[string]structs.ServiceAddress{"foo": {Address: "127.0.0.1", Port: 80}},
+				"envoy_mesh_gateway_no_default_bind":       true,
+				"connect_timeout_ms":                       10,
+			},
+			want: GatewayConfig{
+				ConnectTimeoutMs:    10,
+				BindTaggedAddresses: true,
+				NoDefaultBind:       true,
+				BindAddresses:       map[string]structs.ServiceAddress{"foo": {Address: "127.0.0.1", Port: 80}},
+			},
+		},
+		{
+			name: "new fields override deprecated ones",
+			input: map[string]interface{}{
+				// Deprecated
+				"envoy_mesh_gateway_bind_tagged_addresses": true,
+				"envoy_mesh_gateway_bind_addresses":        map[string]structs.ServiceAddress{"foo": {Address: "127.0.0.1", Port: 80}},
+				"envoy_mesh_gateway_no_default_bind":       true,
+
+				// New
+				"envoy_gateway_bind_tagged_addresses": false,
+				"envoy_gateway_bind_addresses":        map[string]structs.ServiceAddress{"bar": {Address: "127.0.0.1", Port: 8080}},
+				"envoy_gateway_no_default_bind":       false,
+			},
+			want: GatewayConfig{
+				ConnectTimeoutMs:    5000,
+				BindTaggedAddresses: false,
+				NoDefaultBind:       false,
+				BindAddresses:       map[string]structs.ServiceAddress{"bar": {Address: "127.0.0.1", Port: 8080}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseGatewayConfig(tt.input)
 			require.NoError(t, err)
 			require.Equal(t, tt.want, got)
 		})

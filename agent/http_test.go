@@ -42,7 +42,7 @@ func TestHTTPServer_UnixSocket(t *testing.T) {
 
 	// Only testing mode, since uid/gid might not be settable
 	// from test environment.
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		addresses {
 			http = "unix://`+socket+`"
 		}
@@ -111,7 +111,7 @@ func TestHTTPServer_UnixSocket_FileExists(t *testing.T) {
 		t.Fatalf("not a regular file: %s", socket)
 	}
 
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		addresses {
 			http = "unix://`+socket+`"
 		}
@@ -132,7 +132,7 @@ func TestHTTPServer_H2(t *testing.T) {
 	t.Parallel()
 
 	// Fire up an agent with TLS enabled.
-	a := NewTestAgentWithFields(t, true, TestAgent{
+	a := StartTestAgent(t, TestAgent{
 		UseTLS: true,
 		HCL: `
 			key_file = "../test/client_certs/server.key"
@@ -287,7 +287,7 @@ func TestSetMeta(t *testing.T) {
 func TestHTTPAPI_BlockEndpoints(t *testing.T) {
 	t.Parallel()
 
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		http_config {
 			block_endpoints = ["/v1/agent/self"]
 		}
@@ -320,14 +320,14 @@ func TestHTTPAPI_BlockEndpoints(t *testing.T) {
 }
 
 func TestHTTPAPI_Ban_Nonprintable_Characters(t *testing.T) {
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
-	req, err := http.NewRequest("GET", "/v1/kv/bad\x00ness", nil)
+	_, err := http.NewRequest("GET", "/v1/kv/bad\x00ness", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	req, err = http.NewRequest("GET", "/v1/kv/bad%00ness", nil)
+	req, err := http.NewRequest("GET", "/v1/kv/bad%00ness", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,14 +339,14 @@ func TestHTTPAPI_Ban_Nonprintable_Characters(t *testing.T) {
 }
 
 func TestHTTPAPI_Allow_Nonprintable_Characters_With_Flag(t *testing.T) {
-	a := NewTestAgent(t, t.Name(), "disable_http_unprintable_char_filter = true")
+	a := NewTestAgent(t, "disable_http_unprintable_char_filter = true")
 	defer a.Shutdown()
 
-	req, err := http.NewRequest("GET", "/v1/kv/bad\x00ness", nil)
+	_, err := http.NewRequest("GET", "/v1/kv/bad\x00ness", nil)
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	req, err = http.NewRequest("GET", "/v1/kv/bad%00ness", nil)
+	req, err := http.NewRequest("GET", "/v1/kv/bad%00ness", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
 	t.Parallel()
 	// Header should not be present if address translation is off.
 	{
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 
 		resp := httptest.NewRecorder()
@@ -381,7 +381,7 @@ func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
 
 	// Header should be set to true if it's turned on.
 	{
-		a := NewTestAgent(t, t.Name(), `
+		a := NewTestAgent(t, `
 			translate_wan_addrs = true
 		`)
 		defer a.Shutdown()
@@ -403,7 +403,7 @@ func TestHTTPAPI_TranslateAddrHeader(t *testing.T) {
 
 func TestHTTPAPIResponseHeaders(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		http_config {
 			response_headers = {
 				"Access-Control-Allow-Origin" = "*"
@@ -431,10 +431,40 @@ func TestHTTPAPIResponseHeaders(t *testing.T) {
 		t.Fatalf("bad X-XSS-Protection header: expected %q, got %q", "1; mode=block", xss)
 	}
 }
+func TestUIResponseHeaders(t *testing.T) {
+	t.Parallel()
+	a := NewTestAgent(t, `
+		http_config {
+			response_headers = {
+				"Access-Control-Allow-Origin" = "*"
+				"X-Frame-Options" = "SAMEORIGIN"
+			}
+		}
+	`)
+	defer a.Shutdown()
+
+	resp := httptest.NewRecorder()
+	handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
+		return nil, nil
+	}
+
+	req, _ := http.NewRequest("GET", "/ui", nil)
+	a.srv.wrap(handler, []string{"GET"})(resp, req)
+
+	origin := resp.Header().Get("Access-Control-Allow-Origin")
+	if origin != "*" {
+		t.Fatalf("bad Access-Control-Allow-Origin: expected %q, got %q", "*", origin)
+	}
+
+	frameOptions := resp.Header().Get("X-Frame-Options")
+	if frameOptions != "SAMEORIGIN" {
+		t.Fatalf("bad X-XSS-Protection header: expected %q, got %q", "SAMEORIGIN", frameOptions)
+	}
+}
 
 func TestContentTypeIsJSON(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
@@ -456,7 +486,7 @@ func TestContentTypeIsJSON(t *testing.T) {
 func TestHTTP_wrap_obfuscateLog(t *testing.T) {
 	t.Parallel()
 	buf := new(bytes.Buffer)
-	a := NewTestAgentWithFields(t, true, TestAgent{LogOutput: buf})
+	a := StartTestAgent(t, TestAgent{LogOutput: buf})
 	defer a.Shutdown()
 
 	handler := func(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
@@ -517,7 +547,7 @@ func TestPrettyPrintBare(t *testing.T) {
 }
 
 func testPrettyPrint(pretty string, t *testing.T) {
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	r := &structs.DirEntry{Key: "key"}
@@ -545,7 +575,7 @@ func testPrettyPrint(pretty string, t *testing.T) {
 
 func TestParseSource(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	// Default is agent's DC and no node (since the user didn't care, then
@@ -744,7 +774,7 @@ func TestParseWait(t *testing.T) {
 func TestPProfHandlers_EnableDebug(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
-	a := NewTestAgent(t, t.Name(), "enable_debug = true")
+	a := NewTestAgent(t, "enable_debug = true")
 	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
@@ -758,7 +788,7 @@ func TestPProfHandlers_EnableDebug(t *testing.T) {
 func TestPProfHandlers_DisableDebugNoACLs(t *testing.T) {
 	t.Parallel()
 	require := require.New(t)
-	a := NewTestAgent(t, t.Name(), "enable_debug = false")
+	a := NewTestAgent(t, "enable_debug = false")
 	defer a.Shutdown()
 
 	resp := httptest.NewRecorder()
@@ -774,7 +804,7 @@ func TestPProfHandlers_ACLs(t *testing.T) {
 	assert := assert.New(t)
 	dc1 := "dc1"
 
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 	acl_datacenter = "`+dc1+`"
 	acl_default_policy = "deny"
 	acl_master_token = "master"
@@ -877,7 +907,7 @@ func TestParseConsistency(t *testing.T) {
 	var b structs.QueryOptions
 
 	req, _ := http.NewRequest("GET", "/v1/catalog/nodes?stale", nil)
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	if d := a.srv.parseConsistency(resp, req, &b); d {
 		t.Fatalf("unexpected done")
@@ -929,7 +959,7 @@ func ensureConsistency(t *testing.T, a *TestAgent, path string, maxStale time.Du
 }
 
 func TestParseConsistencyAndMaxStale(t *testing.T) {
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	// Default => Consistent
@@ -942,7 +972,7 @@ func TestParseConsistencyAndMaxStale(t *testing.T) {
 	ensureConsistency(t, a, "/v1/catalog/nodes?stale&max_stale=3s", 3*time.Second, false)
 
 	// stale by defaul on discovery
-	a.config.DiscoveryMaxStale = time.Duration(7 * time.Second)
+	a.config.DiscoveryMaxStale = 7 * time.Second
 	ensureConsistency(t, a, "/v1/catalog/nodes", a.config.DiscoveryMaxStale, false)
 	// Not in KV
 	ensureConsistency(t, a, "/v1/kv/my/path", 0, false)
@@ -965,7 +995,7 @@ func TestParseConsistency_Invalid(t *testing.T) {
 	var b structs.QueryOptions
 
 	req, _ := http.NewRequest("GET", "/v1/catalog/nodes?stale&consistent", nil)
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 	if d := a.srv.parseConsistency(resp, req, &b); !d {
 		t.Fatalf("expected done")
@@ -1026,7 +1056,7 @@ func TestACLResolution(t *testing.T) {
 	reqAuthBearerAndXToken.Header.Add("X-Consul-Token", "xtoken")
 	reqAuthBearerAndXToken.Header.Add("Authorization", "Bearer bearer-token")
 
-	a := NewTestAgent(t, t.Name(), "")
+	a := NewTestAgent(t, "")
 	defer a.Shutdown()
 
 	// Check when no token is set
@@ -1116,7 +1146,7 @@ func TestACLResolution(t *testing.T) {
 
 func TestEnableWebUI(t *testing.T) {
 	t.Parallel()
-	a := NewTestAgent(t, t.Name(), `
+	a := NewTestAgent(t, `
 		ui = true
 	`)
 	defer a.Shutdown()
@@ -1190,7 +1220,7 @@ func TestAllowedNets(t *testing.T) {
 			nets = append(nets, in)
 		}
 
-		a := NewTestAgent(t, t.Name(), "")
+		a := NewTestAgent(t, "")
 		defer a.Shutdown()
 		testrpc.WaitForTestAgent(t, a.RPC, "dc1")
 
@@ -1258,7 +1288,7 @@ func TestHTTPServer_HandshakeTimeout(t *testing.T) {
 	t.Parallel()
 
 	// Fire up an agent with TLS enabled.
-	a := NewTestAgentWithFields(t, true, TestAgent{
+	a := StartTestAgent(t, TestAgent{
 		UseTLS: true,
 		HCL: `
 			key_file = "../test/client_certs/server.key"
@@ -1324,7 +1354,7 @@ func TestRPC_HTTPSMaxConnsPerClient(t *testing.T) {
 			}
 
 			// Fire up an agent with TLS enabled.
-			a := NewTestAgentWithFields(t, true, TestAgent{
+			a := StartTestAgent(t, TestAgent{
 				UseTLS: tc.tlsEnabled,
 				HCL: hclPrefix + `
 					limits {

@@ -1,6 +1,7 @@
 package consul
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,6 +113,10 @@ func (a *ACL) BootstrapTokens(args *structs.DCSpecificRequest, reply *structs.AC
 		return err
 	}
 	if done, err := a.srv.forward("ACL.BootstrapTokens", args, args, reply); done {
+		return err
+	}
+
+	if err := a.srv.aclBootstrapAllowed(); err != nil {
 		return err
 	}
 
@@ -311,6 +316,7 @@ func (a *ACL) TokenClone(args *structs.ACLTokenSetRequest, reply *structs.ACLTok
 		Datacenter: args.Datacenter,
 		ACLToken: structs.ACLToken{
 			Policies:          token.Policies,
+			Roles:             token.Roles,
 			ServiceIdentities: token.ServiceIdentities,
 			Local:             token.Local,
 			Description:       token.Description,
@@ -680,13 +686,13 @@ func validateBindingRuleBindName(bindType, bindName string, availableFields []st
 }
 
 // computeBindingRuleBindName processes the HIL for the provided bind type+name
-// using the verified fields.
+// using the projected variables.
 //
 // - If the HIL is invalid ("", false, AN_ERROR) is returned.
 // - If the computed name is not valid for the type ("INVALID_NAME", false, nil) is returned.
 // - If the computed name is valid for the type ("VALID_NAME", true, nil) is returned.
-func computeBindingRuleBindName(bindType, bindName string, verifiedFields map[string]string) (string, bool, error) {
-	bindName, err := InterpolateHIL(bindName, verifiedFields)
+func computeBindingRuleBindName(bindType, bindName string, projectedVars map[string]string) (string, bool, error) {
+	bindName, err := InterpolateHIL(bindName, projectedVars, true)
 	if err != nil {
 		return "", false, err
 	}
@@ -951,7 +957,16 @@ func (a *ACL) PolicyRead(args *structs.ACLPolicyGetRequest, reply *structs.ACLPo
 
 	return a.srv.blockingQuery(&args.QueryOptions, &reply.QueryMeta,
 		func(ws memdb.WatchSet, state *state.Store) error {
-			index, policy, err := state.ACLPolicyGetByID(ws, args.PolicyID, &args.EnterpriseMeta)
+			var (
+				index  uint64
+				policy *structs.ACLPolicy
+				err    error
+			)
+			if args.PolicyID != "" {
+				index, policy, err = state.ACLPolicyGetByID(ws, args.PolicyID, &args.EnterpriseMeta)
+			} else {
+				index, policy, err = state.ACLPolicyGetByName(ws, args.PolicyName, &args.EnterpriseMeta)
+			}
 
 			if err != nil {
 				return err
@@ -1249,11 +1264,25 @@ func (a *ACL) PolicyResolve(args *structs.ACLPolicyBatchGetRequest, reply *struc
 		return err
 	}
 
+	entIdentity, entPolicies, err := a.srv.acls.resolveEnterpriseIdentityAndPolicies(identity)
+	if err != nil {
+		return err
+	}
+
 	idMap := make(map[string]*structs.ACLPolicy)
 	for _, policyID := range identity.PolicyIDs() {
 		idMap[policyID] = nil
 	}
+	if entIdentity != nil {
+		for _, policyID := range entIdentity.PolicyIDs() {
+			idMap[policyID] = nil
+		}
+	}
+
 	for _, policy := range policies {
+		idMap[policy.ID] = policy
+	}
+	for _, policy := range entPolicies {
 		idMap[policy.ID] = policy
 	}
 
@@ -1679,11 +1708,25 @@ func (a *ACL) RoleResolve(args *structs.ACLRoleBatchGetRequest, reply *structs.A
 		return err
 	}
 
+	entIdentity, entRoles, err := a.srv.acls.resolveEnterpriseIdentityAndRoles(identity)
+	if err != nil {
+		return err
+	}
+
 	idMap := make(map[string]*structs.ACLRole)
 	for _, roleID := range identity.RoleIDs() {
 		idMap[roleID] = nil
 	}
+	if entIdentity != nil {
+		for _, roleID := range entIdentity.RoleIDs() {
+			idMap[roleID] = nil
+		}
+	}
+
 	for _, role := range roles {
+		idMap[role.ID] = role
+	}
+	for _, role := range entRoles {
 		idMap[role.ID] = role
 	}
 
@@ -1828,10 +1871,11 @@ func (a *ACL) BindingRuleSet(args *structs.ACLBindingRuleSetRequest, reply *stru
 		return err
 	}
 
+	// Create a blank placeholder identity for use in validation below.
+	blankID := validator.NewIdentity()
+
 	if rule.Selector != "" {
-		selectableVars := validator.MakeFieldMapSelectable(map[string]string{})
-		_, err := bexpr.CreateEvaluatorForType(rule.Selector, nil, selectableVars)
-		if err != nil {
+		if _, err := bexpr.CreateEvaluatorForType(rule.Selector, nil, blankID.SelectableFields); err != nil {
 			return fmt.Errorf("invalid Binding Rule: Selector is invalid: %v", err)
 		}
 	}
@@ -1851,7 +1895,7 @@ func (a *ACL) BindingRuleSet(args *structs.ACLBindingRuleSetRequest, reply *stru
 		return fmt.Errorf("Invalid Binding Rule: unknown BindType %q", rule.BindType)
 	}
 
-	if valid, err := validateBindingRuleBindName(rule.BindType, rule.BindName, validator.AvailableFields()); err != nil {
+	if valid, err := validateBindingRuleBindName(rule.BindType, rule.BindName, blankID.ProjectedVarNames()); err != nil {
 		return fmt.Errorf("Invalid Binding Rule: invalid BindName: %v", err)
 	} else if !valid {
 		return fmt.Errorf("Invalid Binding Rule: invalid BindName")
@@ -1865,9 +1909,8 @@ func (a *ACL) BindingRuleSet(args *structs.ACLBindingRuleSetRequest, reply *stru
 	if err != nil {
 		return fmt.Errorf("Failed to apply binding rule upsert request: %v", err)
 	}
-
 	if respErr, ok := resp.(error); ok {
-		return respErr
+		return fmt.Errorf("Failed to apply binding rule upsert request: %v", respErr)
 	}
 
 	if _, rule, err := a.srv.fsm.State().ACLBindingRuleGetByID(nil, rule.ID, &rule.EnterpriseMeta); err == nil && rule != nil {
@@ -2005,6 +2048,10 @@ func (a *ACL) AuthMethodRead(args *structs.ACLAuthMethodGetRequest, reply *struc
 				return err
 			}
 
+			if method != nil {
+				_ = a.enterpriseAuthMethodTypeValidation(method.Type)
+			}
+
 			reply.Index, reply.AuthMethod = index, method
 			return nil
 		})
@@ -2049,6 +2096,10 @@ func (a *ACL) AuthMethodSet(args *structs.ACLAuthMethodSetRequest, reply *struct
 		return fmt.Errorf("Invalid Auth Method: invalid Name. Only alphanumeric characters, '-' and '_' are allowed")
 	}
 
+	if err := a.enterpriseAuthMethodTypeValidation(method.Type); err != nil {
+		return err
+	}
+
 	// Check to see if the method exists first.
 	_, existing, err := state.ACLAuthMethodGetByName(nil, method.Name, &method.EnterpriseMeta)
 	if err != nil {
@@ -2067,10 +2118,25 @@ func (a *ACL) AuthMethodSet(args *structs.ACLAuthMethodSetRequest, reply *struct
 		return fmt.Errorf("Invalid Auth Method: Type should be one of: %v", authmethod.Types())
 	}
 
+	if method.MaxTokenTTL != 0 {
+		if method.MaxTokenTTL > a.srv.config.ACLTokenMaxExpirationTTL {
+			return fmt.Errorf("MaxTokenTTL %s cannot be more than %s",
+				method.MaxTokenTTL, a.srv.config.ACLTokenMaxExpirationTTL)
+		} else if method.MaxTokenTTL < a.srv.config.ACLTokenMinExpirationTTL {
+			return fmt.Errorf("MaxTokenTTL %s cannot be less than %s",
+				method.MaxTokenTTL, a.srv.config.ACLTokenMinExpirationTTL)
+		}
+	}
+
 	// Instantiate a validator but do not cache it yet. This will validate the
 	// configuration.
-	if _, err := authmethod.NewValidator(method); err != nil {
+	validator, err := authmethod.NewValidator(a.srv.logger, method)
+	if err != nil {
 		return fmt.Errorf("Invalid Auth Method: %v", err)
+	}
+
+	if err := enterpriseAuthMethodValidation(method, validator); err != nil {
+		return err
 	}
 
 	if err := a.srv.fsm.State().ACLAuthMethodUpsertValidateEnterprise(method, existing); err != nil {
@@ -2134,6 +2200,10 @@ func (a *ACL) AuthMethodDelete(args *structs.ACLAuthMethodDeleteRequest, reply *
 		return nil
 	}
 
+	if err := a.enterpriseAuthMethodTypeValidation(method.Type); err != nil {
+		return err
+	}
+
 	req := structs.ACLAuthMethodBatchDeleteRequest{
 		AuthMethodNames: []string{args.AuthMethodName},
 		EnterpriseMeta:  args.EnterpriseMeta,
@@ -2190,6 +2260,7 @@ func (a *ACL) AuthMethodList(args *structs.ACLAuthMethodListRequest, reply *stru
 
 			var stubs structs.ACLAuthMethodListStubs
 			for _, method := range methods {
+				_ = a.enterpriseAuthMethodTypeValidation(method.Type)
 				stubs = append(stubs, method.Stub())
 			}
 
@@ -2235,22 +2306,54 @@ func (a *ACL) Login(args *structs.ACLLoginRequest, reply *structs.ACLToken) erro
 		return acl.ErrNotFound
 	}
 
+	if err := a.enterpriseAuthMethodTypeValidation(method.Type); err != nil {
+		return err
+	}
+
 	validator, err := a.srv.loadAuthMethodValidator(idx, method)
 	if err != nil {
 		return err
 	}
 
 	// 2. Send args.Data.BearerToken to method validator and get back a fields map
-	verifiedFields, desiredMeta, err := validator.ValidateLogin(auth.BearerToken)
+	verifiedIdentity, err := validator.ValidateLogin(context.Background(), auth.BearerToken)
 	if err != nil {
 		return err
 	}
 
+	return a.tokenSetFromAuthMethod(
+		method,
+		&auth.EnterpriseMeta,
+		"token created via login",
+		auth.Meta,
+		validator,
+		verifiedIdentity,
+		&structs.ACLTokenSetRequest{
+			Datacenter:   args.Datacenter,
+			WriteRequest: args.WriteRequest,
+		},
+		reply,
+	)
+}
+
+func (a *ACL) tokenSetFromAuthMethod(
+	method *structs.ACLAuthMethod,
+	entMeta *structs.EnterpriseMeta,
+	tokenDescriptionPrefix string,
+	tokenMetadata map[string]string,
+	validator authmethod.Validator,
+	verifiedIdentity *authmethod.Identity,
+	createReq *structs.ACLTokenSetRequest, // this should be prepopulated with datacenter+writerequest
+	reply *structs.ACLToken,
+) error {
 	// This always will return a valid pointer
-	targetMeta := method.TargetEnterpriseMeta(desiredMeta)
+	targetMeta, err := computeTargetEnterpriseMeta(method, verifiedIdentity)
+	if err != nil {
+		return err
+	}
 
 	// 3. send map through role bindings
-	serviceIdentities, roleLinks, err := a.srv.evaluateRoleBindings(validator, verifiedFields, &auth.EnterpriseMeta, targetMeta)
+	serviceIdentities, roleLinks, err := a.srv.evaluateRoleBindings(validator, verifiedIdentity, entMeta, targetMeta)
 	if err != nil {
 		return err
 	}
@@ -2261,8 +2364,10 @@ func (a *ACL) Login(args *structs.ACLLoginRequest, reply *structs.ACLToken) erro
 		return acl.ErrPermissionDenied
 	}
 
-	description := "token created via login"
-	loginMeta, err := encodeLoginMeta(auth.Meta)
+	// TODO(sso): add a CapturedField to ACLAuthMethod that would pluck fields from the returned identity and stuff into `auth.Meta`.
+
+	description := tokenDescriptionPrefix
+	loginMeta, err := encodeLoginMeta(tokenMetadata)
 	if err != nil {
 		return err
 	}
@@ -2271,23 +2376,20 @@ func (a *ACL) Login(args *structs.ACLLoginRequest, reply *structs.ACLToken) erro
 	}
 
 	// 4. create token
-	createReq := structs.ACLTokenSetRequest{
-		Datacenter: args.Datacenter,
-		ACLToken: structs.ACLToken{
-			Description:       description,
-			Local:             true,
-			AuthMethod:        auth.AuthMethod,
-			ServiceIdentities: serviceIdentities,
-			Roles:             roleLinks,
-			EnterpriseMeta:    *targetMeta,
-		},
-		WriteRequest: args.WriteRequest,
+	createReq.ACLToken = structs.ACLToken{
+		Description:       description,
+		Local:             true,
+		AuthMethod:        method.Name,
+		ServiceIdentities: serviceIdentities,
+		Roles:             roleLinks,
+		ExpirationTTL:     method.MaxTokenTTL,
+		EnterpriseMeta:    *targetMeta,
 	}
 
-	createReq.ACLToken.ACLAuthMethodEnterpriseMeta.FillWithEnterpriseMeta(&auth.EnterpriseMeta)
+	createReq.ACLToken.ACLAuthMethodEnterpriseMeta.FillWithEnterpriseMeta(entMeta)
 
 	// 5. return token information like a TokenCreate would
-	err = a.tokenSetInternal(&createReq, reply, true)
+	err = a.tokenSetInternal(createReq, reply, true)
 
 	// If we were in a slight race with a role delete operation then we may
 	// still end up failing to insert an unprivileged token in the state

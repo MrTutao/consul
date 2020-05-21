@@ -1186,15 +1186,26 @@ func TestAPI_AgentMonitor(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	// Wait for the first log message and validate it
-	select {
-	case log := <-logCh:
-		if !(strings.Contains(log, "[INFO]") || strings.Contains(log, "[DEBUG]")) {
-			t.Fatalf("bad: %q", log)
+	retry.Run(t, func(r *retry.R) {
+		{
+			// Register a service to be sure something happens in secs
+			serviceReg := &AgentServiceRegistration{
+				Name: "redis",
+			}
+			if err := agent.ServiceRegister(serviceReg); err != nil {
+				r.Fatalf("err: %v", err)
+			}
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("failed to get a log message")
-	}
+		// Wait for the first log message and validate it
+		select {
+		case log := <-logCh:
+			if !(strings.Contains(log, "[INFO]") || strings.Contains(log, "[DEBUG]")) {
+				r.Fatalf("bad: %q", log)
+			}
+		case <-time.After(10 * time.Second):
+			r.Fatalf("failed to get a log message")
+		}
+	})
 }
 
 func TestAPI_AgentMonitorJSON(t *testing.T) {
@@ -1209,16 +1220,27 @@ func TestAPI_AgentMonitorJSON(t *testing.T) {
 		t.Fatalf("err: %v", err)
 	}
 
-	// Wait for the first log message and validate it is valid JSON
-	select {
-	case log := <-logCh:
-		var output map[string]interface{}
-		if err := json.Unmarshal([]byte(log), &output); err != nil {
-			t.Fatalf("log output was not JSON: %q", log)
+	retry.Run(t, func(r *retry.R) {
+		{
+			// Register a service to be sure something happens in secs
+			serviceReg := &AgentServiceRegistration{
+				Name: "redis",
+			}
+			if err := agent.ServiceRegister(serviceReg); err != nil {
+				r.Fatalf("err: %v", err)
+			}
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("failed to get a log message")
-	}
+		// Wait for the first log message and validate it is valid JSON
+		select {
+		case log := <-logCh:
+			var output map[string]interface{}
+			if err := json.Unmarshal([]byte(log), &output); err != nil {
+				r.Fatalf("log output was not JSON: %q", log)
+			}
+		case <-time.After(10 * time.Second):
+			r.Fatalf("failed to get a log message")
+		}
+	})
 }
 
 func TestAPI_ServiceMaintenance(t *testing.T) {
@@ -1700,6 +1722,37 @@ func TestAgentService_Register_MeshGateway(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, svc)
 	require.Equal(t, ServiceKindMeshGateway, svc.Kind)
+	require.NotNil(t, svc.Proxy)
+	require.Contains(t, svc.Proxy.Config, "foo")
+	require.Equal(t, "bar", svc.Proxy.Config["foo"])
+}
+
+func TestAgentService_Register_TerminatingGateway(t *testing.T) {
+	t.Parallel()
+	c, s := makeClient(t)
+	defer s.Stop()
+
+	agent := c.Agent()
+
+	reg := AgentServiceRegistration{
+		Kind:    ServiceKindTerminatingGateway,
+		Name:    "terminating-gateway",
+		Address: "10.1.2.3",
+		Port:    8443,
+		Proxy: &AgentServiceConnectProxyConfig{
+			Config: map[string]interface{}{
+				"foo": "bar",
+			},
+		},
+	}
+
+	err := agent.ServiceRegister(&reg)
+	require.NoError(t, err)
+
+	svc, _, err := agent.Service("terminating-gateway", nil)
+	require.NoError(t, err)
+	require.NotNil(t, svc)
+	require.Equal(t, ServiceKindTerminatingGateway, svc.Kind)
 	require.NotNil(t, svc.Proxy)
 	require.Contains(t, svc.Proxy.Config, "foo")
 	require.Equal(t, "bar", svc.Proxy.Config["foo"])

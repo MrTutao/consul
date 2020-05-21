@@ -50,6 +50,7 @@ const caChangeJitterWindow = 30 * time.Second
 // ConnectCALeaf supports fetching and generating Connect leaf
 // certificates.
 type ConnectCALeaf struct {
+	RegisterOptionsBlockingRefresh
 	caIndex uint64 // Current index for CA roots
 
 	// rootWatchMu protects access to the rootWatchSubscribers map and
@@ -520,6 +521,7 @@ func (c *ConnectCALeaf) generateNewLeaf(req *ConnectCALeafRequest,
 			Service:    req.Service,
 		}
 		commonName = connect.ServiceCN(req.Service, req.TargetNamespace(), roots.TrustDomain)
+		dnsNames = append(dnsNames, req.DNSSAN...)
 	} else if req.Agent != "" {
 		id = &connect.SpiffeIDAgent{
 			Host:       roots.TrustDomain,
@@ -629,10 +631,6 @@ func (c *ConnectCALeaf) generateNewLeaf(req *ConnectCALeafRequest,
 	return result, nil
 }
 
-func (c *ConnectCALeaf) SupportsBlocking() bool {
-	return true
-}
-
 // ConnectCALeafRequest is the cache.Request implementation for the
 // ConnectCALeaf cache type. This is implemented here and not in structs
 // since this is only used for cache-related requests and not forwarded
@@ -660,6 +658,8 @@ func (r *ConnectCALeafRequest) Key() string {
 	v, err := hashstructure.Hash([]interface{}{
 		r.Service,
 		r.EnterpriseMeta,
+		r.DNSSAN,
+		r.IPSAN,
 	}, nil)
 	if err == nil {
 		return fmt.Sprintf("service:%d", v)
