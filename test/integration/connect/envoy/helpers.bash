@@ -110,7 +110,6 @@ function assert_proxy_presents_cert_uri {
   local DC=${3:-primary}
   local NS=${4:-default}
 
-
   CERT=$(retry_default get_cert $HOSTPORT)
 
   echo "WANT SERVICE: ${NS}/${SERVICENAME}"
@@ -153,20 +152,48 @@ function assert_envoy_version {
   echo $VERSION | grep "/$ENVOY_VERSION/"
 }
 
+function assert_envoy_http_rbac_policy_count {
+  local HOSTPORT=$1
+  local EXPECT_COUNT=$2
+
+  GOT_COUNT=$(get_envoy_http_rbac_once $HOSTPORT | jq '.rules.policies | length')
+  [ "${GOT_COUNT:-0}" -eq $EXPECT_COUNT ]
+}
+
+function get_envoy_http_rbac_once {
+  local HOSTPORT=$1
+  run curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener.filter_chains[0].filters[0].config.http_filters[] | select(.name == "envoy.filters.http.rbac") | .config'
+}
+
+function assert_envoy_network_rbac_policy_count {
+  local HOSTPORT=$1
+  local EXPECT_COUNT=$2
+
+  GOT_COUNT=$(get_envoy_network_rbac_once $HOSTPORT | jq '.rules.policies | length')
+  [ "${GOT_COUNT:-0}" -eq $EXPECT_COUNT ]
+}
+
+function get_envoy_network_rbac_once {
+  local HOSTPORT=$1
+  run curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener.filter_chains[0].filters[] | select(.name == "envoy.filters.network.rbac") | .config'
+}
+
 function get_envoy_listener_filters {
   local HOSTPORT=$1
   run retry_default curl -s -f $HOSTPORT/config_dump
   [ "$status" -eq 0 ]
-  local ENVOY_VERSION=$(echo $output | jq --raw-output '.configs[0].bootstrap.node.metadata.envoy_version')
-  local QUERY=''
-  # from 1.13.0 on the config json looks slightly different
-  # 1.10.x, 1.11.x, 1.12.x are not affected
-  if [[ "$ENVOY_VERSION" =~ ^1\.1[012]\. ]]; then
-    QUERY='.configs[2].dynamic_active_listeners[].listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
-  else
-    QUERY='.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
-  fi
-  echo "$output" | jq --raw-output "$QUERY"
+  echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters | map(.name) | join(","))"'
+}
+
+function get_envoy_http_filters {
+  local HOSTPORT=$1
+  run retry_default curl -s -f $HOSTPORT/config_dump
+  [ "$status" -eq 0 ]
+  echo "$output" | jq --raw-output '.configs[2].dynamic_listeners[].active_state.listener | "\(.name) \( .filter_chains[0].filters[] | select(.name == "envoy.http_connection_manager") | .config.http_filters | map(.name) | join(","))"'
 }
 
 function get_envoy_cluster_config {
@@ -225,7 +252,7 @@ function get_upstream_endpoint_in_status_count {
   local HOSTPORT=$1
   local CLUSTER_NAME=$2
   local HEALTH_STATUS=$3
-  run retry_default curl -s -f "http://${HOSTPORT}/clusters?format=json"
+  run curl -s -f "http://${HOSTPORT}/clusters?format=json"
   [ "$status" -eq 0 ]
   # echo "$output" >&3
   echo "$output" | jq --raw-output "
@@ -348,7 +375,7 @@ function get_healthy_service_count {
   local DC=$2
   local NS=$3
 
-  run retry_default curl -s -f ${HEADERS} "127.0.0.1:8500/v1/health/connect/${SERVICE_NAME}?dc=${DC}&passing&ns=${NS}"
+  run curl -s -f ${HEADERS} "127.0.0.1:8500/v1/health/connect/${SERVICE_NAME}?dc=${DC}&passing&ns=${NS}"
   [ "$status" -eq 0 ]
   echo "$output" | jq --raw-output '. | length'
 }
@@ -425,7 +452,7 @@ function docker_consul {
 function docker_wget {
   local DC=$1
   shift 1
-  docker run -ti --rm --network container:envoy_consul-${DC}_1 alpine:3.9 wget "$@"
+  docker run --rm --network container:envoy_consul-${DC}_1 alpine:3.9 wget "$@"
 }
 
 function docker_curl {
@@ -529,12 +556,82 @@ function must_fail_tcp_connection {
 # to generate a 503 response since the upstreams have refused connection.
 function must_fail_http_connection {
   # Attempt to curl through upstream
-  run curl -s -i -d hello $1
+  run curl -s -i -d hello "$1"
 
   echo "OUTPUT $output"
 
+  [ "$status" == "0" ]
+
+  local expect_response="${2:-403 Forbidden}"
   # Should fail request with 503
-  echo "$output" | grep '503 Service Unavailable'
+  echo "$output" | grep "${expect_response}"
+}
+
+# must_pass_http_request allows you to craft a specific http request to assert
+# that envoy will NOT reject the request. Primarily of use for testing L7
+# intentions.
+function must_pass_http_request {
+  local METHOD=$1
+  local URL=$2
+  local DEBUG_HEADER_VALUE="${3:-""}"
+
+  local extra_args
+  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
+    extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
+  fi
+  case "$METHOD" in
+    GET)
+      ;;
+    DELETE)
+      extra_args="$extra_args -X${METHOD}"
+      ;;
+    PUT|POST)
+      extra_args="$extra_args -d'{}' -X${METHOD}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  run retry_default curl -v -s -f $extra_args "$URL"
+  [ "$status" == 0 ]
+}
+
+# must_fail_http_request allows you to craft a specific http request to assert
+# that envoy will reject the request. Primarily of use for testing L7
+# intentions.
+function must_fail_http_request {
+  local METHOD=$1
+  local URL=$2
+  local DEBUG_HEADER_VALUE="${3:-""}"
+
+  local extra_args
+  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
+      extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
+  fi
+  case "$METHOD" in
+    HEAD)
+      extra_args="$extra_args -I"
+      ;;
+    GET)
+      ;;
+    DELETE)
+      extra_args="$extra_args -X${METHOD}"
+      ;;
+    PUT|POST)
+      extra_args="$extra_args -d'{}' -X${METHOD}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  # Attempt to curl through upstream
+  run retry_default curl -s -i $extra_args "$URL"
+
+  echo "OUTPUT $output"
+
+  echo "$output" | grep "403 Forbidden"
 }
 
 function gen_envoy_bootstrap {
@@ -666,7 +763,13 @@ function get_upstream_fortio_name {
   local HOST=$1
   local PORT=$2
   local PREFIX=$3
-  run retry_default curl -v -s -f -H"Host: ${HOST}" "localhost:${PORT}${PREFIX}/debug?env=dump"
+  local DEBUG_HEADER_VALUE="${4:-""}"
+  local extra_args
+  if [[ -n "${DEBUG_HEADER_VALUE}" ]]; then
+      extra_args="-H x-test-debug:${DEBUG_HEADER_VALUE}"
+  fi
+  run retry_default curl -v -s -f -H"Host: ${HOST}" $extra_args \
+      "localhost:${PORT}${PREFIX}/debug?env=dump"
   [ "$status" == 0 ]
   echo "$output" | grep -E "^FORTIO_NAME="
 }
@@ -676,11 +779,29 @@ function assert_expected_fortio_name {
   local HOST=${2:-"localhost"}
   local PORT=${3:-5000}
   local URL_PREFIX=${4:-""}
+  local DEBUG_HEADER_VALUE="${5:-""}"
 
-  GOT=$(get_upstream_fortio_name ${HOST} ${PORT} ${URL_PREFIX})
+  GOT=$(get_upstream_fortio_name ${HOST} ${PORT} "${URL_PREFIX}" "${DEBUG_HEADER_VALUE}")
 
   if [ "$GOT" != "FORTIO_NAME=${EXPECT_NAME}" ]; then
     echo "expected name: $EXPECT_NAME, actual name: $GOT" 1>&2
+    return 1
+  fi
+}
+
+function assert_expected_fortio_name_pattern {
+  local EXPECT_NAME_PATTERN=$1
+  local HOST=${2:-"localhost"}
+  local PORT=${3:-5000}
+  local URL_PREFIX=${4:-""}
+  local DEBUG_HEADER_VALUE="${5:-""}"
+
+  GOT=$(get_upstream_fortio_name ${HOST} ${PORT} "${URL_PREFIX}" "${DEBUG_HEADER_VALUE}")
+
+  if [[ "$GOT" =~ $EXPECT_NAME_PATTERN ]]; then
+      :
+  else
+    echo "expected name pattern: $EXPECT_NAME_PATTERN, actual name: $GOT" 1>&2
     return 1
   fi
 }

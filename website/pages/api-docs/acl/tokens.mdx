@@ -7,13 +7,13 @@ description: The /acl/token endpoints manage Consul's ACL Tokens.
 
 # ACL Token HTTP API
 
--> **1.4.0+:** The APIs are available in Consul versions 1.4.0 and later. The documentation for the legacy ACL API is [here](/api/acl/legacy)
+-> **1.4.0+:** The APIs are available in Consul versions 1.4.0 and later. The documentation for the legacy ACL API is [here](/api/acl/legacy).
 
 The `/acl/token` endpoints [create](#create-a-token), [read](#read-a-token),
 [update](#update-a-token), [list](#list-tokens), [clone](#clone-a-token) and [delete](#delete-a-token) ACL tokens in Consul.
 
-For more information on how to setup ACLs, please see
-the [ACL Guide](https://learn.hashicorp.com/consul/advanced/day-1-operations/production-acls).
+For more information on how to setup ACLs, please check
+the [ACL tutorial](https://learn.hashicorp.com/tutorials/consul/access-control-setup-production).
 
 ## Create a Token
 
@@ -74,6 +74,18 @@ The table below shows this endpoint's support for
     policy is valid in all datacenters including those which do not yet exist
     but may in the future.
 
+- `NodeIdentities` `(array<NodeIdentity>)` - The list of [node
+  identities](/docs/acl/acl-system#acl-node-identities) that should be
+  applied to the token. Added in Consul 1.8.1.
+
+  - `NodeName` `(string: <required>)` - The name of the node. The name
+    must be no longer than 256 characters, must start and end with a lowercase
+    alphanumeric character, and can only contain lowercase alphanumeric
+    characters as well as `-` and `_`.
+
+  - `Datacenter` `(string: <required>)` - Specifies the nodes datacenter. This
+    will result in effective policy only being valid in that datacenter.
+
 - `Local` `(bool: false)` - If true, indicates that the token should not be
   replicated globally and instead be local to the current datacenter.
 
@@ -91,7 +103,7 @@ The table below shows this endpoint's support for
 - `Namespace` `(string: "")` <EnterpriseAlert inline /> - Specifies the namespace to
   create the token. If not provided in the JSON body, the value of
   the `ns` URL query parameter or in the `X-Consul-Namespace` header will be used.
-  If not provided at all, the namespace will be inherited from the request's ACL
+  If not provided, the namespace will be inherited from the request's ACL
   token or will default to the `default` namespace. Added in Consul 1.7.0.
 
 ### Sample Payload
@@ -113,7 +125,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X PUT \
     --data @payload.json \
     http://127.0.0.1:8500/v1/acl/token
@@ -175,7 +187,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X GET http://127.0.0.1:8500/v1/acl/token/6a1253d2-1785-24fd-91c2-f8e78c745511
 ```
 
@@ -234,7 +246,7 @@ retrieving the data for a token that you must already possess its secret.
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -H "X-Consul-Token: 6a1253d2-1785-24fd-91c2-f8e78c745511" \
    http://127.0.0.1:8500/v1/acl/token/self
 ```
@@ -323,6 +335,18 @@ The table below shows this endpoint's support for
     policy is valid in all datacenters including those which do not yet exist
     but may in the future.
 
+- `NodeIdentities` `(array<NodeIdentity>)` - The list of [node
+  identities](/docs/acl/acl-system#acl-node-identities) that should be
+  applied to the token. Added in Consul 1.8.1.
+
+  - `NodeName` `(string: <required>)` - The name of the node. The name
+    must be no longer than 256 characters, must start and end with a lowercase
+    alphanumeric character, and can only contain lowercase alphanumeric
+    characters as well as `-` and `_`.
+
+  - `Datacenter` `(string: <required>)` - Specifies the nodes datacenter. This
+    will result in effective policy only being valid in that datacenter.
+
 - `Local` `(bool: false)` - If true, indicates that this token should not be
   replicated globally and instead be local to the current datacenter. This
   value must match the existing value or the request will return an error.
@@ -340,7 +364,7 @@ The table below shows this endpoint's support for
 - `Namespace` `(string: "")` <EnterpriseAlert inline /> - Specifies the namespace of
   the token to update. If not provided in the JSON body, the value of
   the `ns` URL query parameter or in the `X-Consul-Namespace` header will be used.
-  If not provided at all, the namespace will be inherited from the request's ACL
+  If not provided, the namespace will be inherited from the request's ACL
   token or will default to the `default` namespace. Added in Consul 1.7.0.
 
 ### Sample Payload
@@ -365,7 +389,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X PUT \
     --data @payload.json \
     http://127.0.0.1:8500/v1/acl/token/6a1253d2-1785-24fd-91c2-f8e78c745511
@@ -428,7 +452,7 @@ The table below shows this endpoint's support for
 - `Namespace` `(string: "")` <EnterpriseAlert inline /> - Specifies the namespace of
   the token to be cloned. If not provided in the JSON body, the value of
   the `ns` URL query parameter or in the `X-Consul-Namespace` header will be used.
-  If not provided at all, the namespace will be inherited from the request's ACL
+  If not provided, the namespace will be inherited from the request's ACL
   token or will default to the `default` namespace. Added in Consul 1.7.0.
 
 ### Sample Payload
@@ -441,7 +465,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X PUT \
     --data @payload.json \
     http://127.0.0.1:8500/v1/acl/token/6a1253d2-1785-24fd-91c2-f8e78c745511/clone
@@ -510,7 +534,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X DELETE \
     http://127.0.0.1:8500/v1/acl/token/8f246b77-f3e1-ff88-5b48-8ec93abf3e05
 ```
@@ -565,7 +589,7 @@ The table below shows this endpoint's support for
 
 ## Sample Request
 
-```shell
+```shell-session
 $ curl -X GET http://127.0.0.1:8500/v1/acl/tokens
 ```
 

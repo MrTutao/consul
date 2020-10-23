@@ -25,27 +25,6 @@ type authzResolver func(string) (structs.ACLIdentity, acl.Authorizer, error)
 type identResolver func(string) (structs.ACLIdentity, error)
 
 type TestACLAgent struct {
-	// Name is an optional name of the agent.
-	Name string
-
-	HCL string
-
-	// Config is the agent configuration. If Config is nil then
-	// TestConfig() is used. If Config.DataDir is set then it is
-	// the callers responsibility to clean up the data directory.
-	// Otherwise, a temporary data directory is created and removed
-	// when Shutdown() is called.
-	Config *config.RuntimeConfig
-
-	// LogOutput is the sink for the logs. If nil, logs are written
-	// to os.Stderr.
-	LogOutput io.Writer
-
-	// DataDir is the data directory which is used when Config.DataDir
-	// is not set. It is created automatically and removed when
-	// Shutdown() is called.
-	DataDir string
-
 	resolveAuthzFn authzResolver
 	resolveIdentFn identResolver
 
@@ -56,38 +35,43 @@ type TestACLAgent struct {
 // Basically it needs a local state for some of the vet* functions, a logger and a delegate.
 // The key is that we are the delegate so we can control the ResolveToken responses
 func NewTestACLAgent(t *testing.T, name string, hcl string, resolveAuthz authzResolver, resolveIdent identResolver) *TestACLAgent {
-	a := &TestACLAgent{Name: name, HCL: hcl, resolveAuthzFn: resolveAuthz, resolveIdentFn: resolveIdent}
-	hclDataDir := `data_dir = "acl-agent"`
+	t.Helper()
 
-	logOutput := testutil.TestWriter(t)
-	logger := hclog.NewInterceptLogger(&hclog.LoggerOptions{
-		Name:   a.Name,
-		Level:  hclog.Debug,
-		Output: logOutput,
-	})
+	a := &TestACLAgent{resolveAuthzFn: resolveAuthz, resolveIdentFn: resolveIdent}
 
-	a.Config = TestConfig(logger,
-		config.Source{Name: a.Name, Format: "hcl", Data: a.HCL},
-		config.Source{Name: a.Name + ".data_dir", Format: "hcl", Data: hclDataDir},
-	)
+	dataDir := testutil.TempDir(t, "acl-agent")
 
-	agent, err := New(a.Config, logger)
+	logBuffer := testutil.NewLogBuffer(t)
+	loader := func(source config.Source) (*config.RuntimeConfig, []string, error) {
+		dataDir := fmt.Sprintf(`data_dir = "%s"`, dataDir)
+		opts := config.BuilderOpts{
+			HCL: []string{TestConfigHCL(NodeID()), hcl, dataDir},
+		}
+		cfg, warnings, err := config.Load(opts, source)
+		if cfg != nil {
+			cfg.Telemetry.Disable = true
+		}
+		return cfg, warnings, err
+	}
+	bd, err := NewBaseDeps(loader, logBuffer)
 	require.NoError(t, err)
+
+	bd.Logger = hclog.NewInterceptLogger(&hclog.LoggerOptions{
+		Name:       name,
+		Level:      hclog.Debug,
+		Output:     logBuffer,
+		TimeFormat: "04:05.000",
+	})
+	bd.MetricsHandler = metrics.NewInmemSink(1*time.Second, time.Minute)
+
+	agent, err := New(bd)
+	require.NoError(t, err)
+
+	agent.delegate = a
+	agent.State = local.NewState(LocalConfig(bd.RuntimeConfig), bd.Logger, bd.Tokens)
+	agent.State.TriggerSyncChanges = func() {}
 	a.Agent = agent
-
-	agent.LogOutput = logOutput
-	agent.logger = logger
-	agent.MemSink = metrics.NewInmemSink(1*time.Second, time.Minute)
-
-	a.Agent.delegate = a
-	a.Agent.State = local.NewState(LocalConfig(a.Config), a.Agent.logger, a.Agent.tokens)
-	a.Agent.State.TriggerSyncChanges = func() {}
 	return a
-}
-
-func (a *TestACLAgent) ACLsEnabled() bool {
-	// the TestACLAgent always has ACLs enabled
-	return true
 }
 
 func (a *TestACLAgent) UseLegacyACLs() bool {
@@ -181,40 +165,28 @@ func (a *TestACLAgent) ReloadConfig(config *consul.Config) error {
 	return fmt.Errorf("Unimplemented")
 }
 
-func TestACL_Version8(t *testing.T) {
+func TestACL_Version8EnabledByDefault(t *testing.T) {
 	t.Parallel()
 
-	t.Run("version 8 disabled", func(t *testing.T) {
-		a := NewTestACLAgent(t, t.Name(), TestACLConfig()+`
- 		acl_enforce_version_8 = false
- 	`, nil, nil)
+	called := false
+	resolveFn := func(string) (structs.ACLIdentity, acl.Authorizer, error) {
+		called = true
+		return nil, nil, acl.ErrNotFound
+	}
+	a := NewTestACLAgent(t, t.Name(), TestACLConfig(), resolveFn, nil)
 
-		token, err := a.resolveToken("nope")
-		require.Nil(t, token)
-		require.Nil(t, err)
-	})
-
-	t.Run("version 8 enabled", func(t *testing.T) {
-		called := false
-		resolveFn := func(string) (structs.ACLIdentity, acl.Authorizer, error) {
-			called = true
-			return nil, nil, acl.ErrNotFound
-		}
-		a := NewTestACLAgent(t, t.Name(), TestACLConfig()+`
- 		acl_enforce_version_8 = true
- 	`, resolveFn, nil)
-
-		_, err := a.resolveToken("nope")
-		require.Error(t, err)
-		require.True(t, called)
-	})
+	_, err := a.resolveToken("nope")
+	require.Error(t, err)
+	require.True(t, called)
 }
 
 func TestACL_AgentMasterToken(t *testing.T) {
 	t.Parallel()
 
 	a := NewTestACLAgent(t, t.Name(), TestACLConfig(), nil, nil)
-	a.loadTokens(a.config)
+	err := a.tokens.Load(a.config.ACLTokens, a.logger)
+	require.NoError(t, err)
+
 	authz, err := a.resolveToken("towel")
 	require.NotNil(t, authz)
 	require.Nil(t, err)
@@ -272,7 +244,7 @@ var (
 		nodeRWSecret: {
 			token: structs.ACLToken{
 				AccessorID: "efb6b7d5-d343-47c1-b4cb-aa6b94d2f490",
-				SecretID:   nodeROSecret,
+				SecretID:   nodeRWSecret,
 			},
 			rules: `node_prefix "Node" { policy = "write" }`,
 		},
@@ -493,9 +465,9 @@ func TestACL_filterMembers(t *testing.T) {
 	require.Len(t, members, 0)
 
 	members = []serf.Member{
-		serf.Member{Name: "Node 1"},
-		serf.Member{Name: "Nope"},
-		serf.Member{Name: "Node 2"},
+		{Name: "Node 1"},
+		{Name: "Nope"},
+		{Name: "Node 2"},
 	}
 	require.NoError(t, a.filterMembers(nodeROSecret, &members))
 	require.Len(t, members, 2)

@@ -8,15 +8,14 @@ import (
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/types"
-	"github.com/pascaldekloe/goe/verify"
 	"github.com/stretchr/testify/require"
 )
 
-func TestStateStore_Txn_Intention(t *testing.T) {
-	require := require.New(t)
+//nolint:staticcheck
+func TestStateStore_Txn_LegacyIntention(t *testing.T) {
 	s := testStateStore(t)
 
-	// Create some intentions.
+	// Create some legacy intentions.
 	ixn1 := &structs.Intention{
 		ID:              testUUID(),
 		SourceNS:        "default",
@@ -45,8 +44,8 @@ func TestStateStore_Txn_Intention(t *testing.T) {
 
 	// Write the first two to the state store, leave the third
 	// to be created by the transaction operation.
-	require.NoError(s.IntentionSet(1, ixn1))
-	require.NoError(s.IntentionSet(2, ixn2))
+	require.NoError(t, s.LegacyIntentionSet(1, ixn1))
+	require.NoError(t, s.LegacyIntentionSet(2, ixn2))
 
 	// Set up a transaction that hits every operation.
 	ops := structs.TxnOps{
@@ -76,14 +75,13 @@ func TestStateStore_Txn_Intention(t *testing.T) {
 
 	// Make sure the response looks as expected.
 	expected := structs.TxnResults{}
-	verify.Values(t, "", results, expected)
+	require.Equal(t, expected, results)
 
 	// Pull the resulting state store contents.
-	idx, actual, err := s.Intentions(nil)
-	require.NoError(err)
-	if idx != 3 {
-		t.Fatalf("bad index: %d", idx)
-	}
+	idx, actual, fromConfig, err := s.Intentions(nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), idx, "wrong index")
+	require.False(t, fromConfig)
 
 	// Make sure it looks as expected.
 	intentions := structs.Intentions{
@@ -114,11 +112,10 @@ func TestStateStore_Txn_Intention(t *testing.T) {
 			},
 		},
 	}
-	verify.Values(t, "", actual, intentions)
+	require.Equal(t, intentions, actual)
 }
 
 func TestStateStore_Txn_Node(t *testing.T) {
-	require := require.New(t)
 	s := testStateStore(t)
 
 	// Create some nodes.
@@ -195,22 +192,21 @@ func TestStateStore_Txn_Node(t *testing.T) {
 			Node: &nodes[1],
 		},
 	}
-	verify.Values(t, "", results, expected)
+	require.Equal(t, expected, results)
 
 	// Pull the resulting state store contents.
 	idx, actual, err := s.Nodes(nil)
-	require.NoError(err)
+	require.NoError(t, err)
 	if idx != 8 {
 		t.Fatalf("bad index: %d", idx)
 	}
 
 	// Make sure it looks as expected.
 	expectedNodes := structs.Nodes{&nodes[0], &nodes[1], &nodes[4]}
-	verify.Values(t, "", actual, expectedNodes)
+	require.Equal(t, expectedNodes, actual)
 }
 
 func TestStateStore_Txn_Service(t *testing.T) {
-	require := require.New(t)
 	s := testStateStore(t)
 
 	testRegisterNode(t, s, 1, "node1")
@@ -284,6 +280,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 					ModifyIndex: 2,
 				},
 				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
+				Meta:           map[string]string{},
 			},
 		},
 		&structs.TxnResult{
@@ -310,11 +307,11 @@ func TestStateStore_Txn_Service(t *testing.T) {
 			},
 		},
 	}
-	verify.Values(t, "", results, expected)
+	require.Equal(t, expected, results)
 
 	// Pull the resulting state store contents.
 	idx, actual, err := s.NodeServices(nil, "node1", nil)
-	require.NoError(err)
+	require.NoError(t, err)
 	if idx != 6 {
 		t.Fatalf("bad index: %d", idx)
 	}
@@ -329,7 +326,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 			},
 		},
 		Services: map[string]*structs.NodeService{
-			"svc1": &structs.NodeService{
+			"svc1": {
 				ID:      "svc1",
 				Service: "svc1",
 				Address: "1.1.1.1",
@@ -340,8 +337,9 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				},
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
+				Meta:           map[string]string{},
 			},
-			"svc5": &structs.NodeService{
+			"svc5": {
 				ID: "svc5",
 				RaftIndex: structs.RaftIndex{
 					CreateIndex: 6,
@@ -350,7 +348,7 @@ func TestStateStore_Txn_Service(t *testing.T) {
 				Weights:        &structs.Weights{Passing: 1, Warning: 1},
 				EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 			},
-			"svc2": &structs.NodeService{
+			"svc2": {
 				ID:   "svc2",
 				Tags: []string{"modified"},
 				RaftIndex: structs.RaftIndex{
@@ -362,11 +360,10 @@ func TestStateStore_Txn_Service(t *testing.T) {
 			},
 		},
 	}
-	verify.Values(t, "", actual, expectedServices)
+	require.Equal(t, expectedServices, actual)
 }
 
 func TestStateStore_Txn_Checks(t *testing.T) {
-	require := require.New(t)
 	s := testStateStore(t)
 
 	testRegisterNode(t, s, 1, "node1")
@@ -462,11 +459,11 @@ func TestStateStore_Txn_Checks(t *testing.T) {
 			},
 		},
 	}
-	verify.Values(t, "", results, expected)
+	require.Equal(t, expected, results)
 
 	// Pull the resulting state store contents.
 	idx, actual, err := s.NodeChecks(nil, "node1", nil)
-	require.NoError(err)
+	require.NoError(t, err)
 	if idx != 6 {
 		t.Fatalf("bad index: %d", idx)
 	}
@@ -504,7 +501,7 @@ func TestStateStore_Txn_Checks(t *testing.T) {
 			EnterpriseMeta: *structs.DefaultEnterpriseMeta(),
 		},
 	}
-	verify.Values(t, "", actual, expectedChecks)
+	require.Equal(t, expectedChecks, actual)
 }
 
 func TestStateStore_Txn_KVS(t *testing.T) {

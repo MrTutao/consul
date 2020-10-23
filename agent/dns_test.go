@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/consul/agent/config"
+	agentdns "github.com/hashicorp/consul/agent/dns"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/lib"
@@ -18,7 +19,6 @@ import (
 	"github.com/hashicorp/consul/testrpc"
 	"github.com/hashicorp/serf/coordinate"
 	"github.com/miekg/dns"
-	"github.com/pascaldekloe/goe/verify"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,7 +151,7 @@ func TestEncodeKVasRFC1464(t *testing.T) {
 
 	for _, test := range tests {
 		answer := encodeKVasRFC1464(test.key, test.value)
-		verify.Values(t, "internalForm", answer, test.internalForm)
+		require.Equal(t, test.internalForm, answer)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestDNSCycleRecursorCheck(t *testing.T) {
 			A:   []byte{0xAC, 0x15, 0x2D, 0x43}, // 172 , 21, 45, 67
 		},
 	}
-	verify.Values(t, "Answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer)
 }
 func TestDNSCycleRecursorCheckAllFail(t *testing.T) {
 	t.Parallel()
@@ -474,7 +474,7 @@ func TestDNSCycleRecursorCheckAllFail(t *testing.T) {
 	client := new(dns.Client)
 	in, _, _ := client.Exchange(m, agent.DNSAddr())
 	//Verify if we hit SERVFAIL from Consul
-	verify.Values(t, "Answer", in.Rcode, dns.RcodeServerFailure)
+	require.Equal(t, dns.RcodeServerFailure, in.Rcode)
 }
 func TestDNS_NodeLookup_CNAME(t *testing.T) {
 	t.Parallel()
@@ -532,7 +532,7 @@ func TestDNS_NodeLookup_CNAME(t *testing.T) {
 			Txt: []string{"my_txt_value"},
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer)
 }
 
 func TestDNS_NodeLookup_TXT(t *testing.T) {
@@ -665,7 +665,7 @@ func TestDNS_NodeLookup_ANY(t *testing.T) {
 			Txt: []string{"key=value"},
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer)
 }
 
 func TestDNS_NodeLookup_ANY_DontSuppressTXT(t *testing.T) {
@@ -706,7 +706,7 @@ func TestDNS_NodeLookup_ANY_DontSuppressTXT(t *testing.T) {
 			Txt: []string{"key=value"},
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer)
 }
 
 func TestDNS_NodeLookup_A_SuppressTXT(t *testing.T) {
@@ -739,7 +739,7 @@ func TestDNS_NodeLookup_A_SuppressTXT(t *testing.T) {
 			A:   []byte{0x7f, 0x0, 0x0, 0x1}, // 127.0.0.1
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer)
 
 	// ensure TXT RR suppression
 	require.Len(t, in.Extra, 0)
@@ -799,7 +799,7 @@ func TestDNS_EDNS0_ECS(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -1013,7 +1013,7 @@ func TestDNS_ServiceReverseLookup(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 				Address: "127.0.0.2",
 			},
@@ -1042,7 +1042,7 @@ func TestDNS_ServiceReverseLookup(t *testing.T) {
 	if !ok {
 		t.Fatalf("Bad: %#v", in.Answer[0])
 	}
-	if ptrRec.Ptr != serviceCanonicalDNSName("db", "dc1", "consul", nil)+"." {
+	if ptrRec.Ptr != serviceCanonicalDNSName("db", "service", "dc1", "consul", nil)+"." {
 		t.Fatalf("Bad: %#v", ptrRec)
 	}
 }
@@ -1061,7 +1061,7 @@ func TestDNS_ServiceReverseLookup_IPV6(t *testing.T) {
 			Address:    "2001:db8::1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 				Address: "2001:db8::ff00:42:8329",
 			},
@@ -1090,7 +1090,7 @@ func TestDNS_ServiceReverseLookup_IPV6(t *testing.T) {
 	if !ok {
 		t.Fatalf("Bad: %#v", in.Answer[0])
 	}
-	if ptrRec.Ptr != serviceCanonicalDNSName("db", "dc1", "consul", nil)+"." {
+	if ptrRec.Ptr != serviceCanonicalDNSName("db", "service", "dc1", "consul", nil)+"." {
 		t.Fatalf("Bad: %#v", ptrRec)
 	}
 }
@@ -1111,7 +1111,7 @@ func TestDNS_ServiceReverseLookup_CustomDomain(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 				Address: "127.0.0.2",
 			},
@@ -1140,7 +1140,7 @@ func TestDNS_ServiceReverseLookup_CustomDomain(t *testing.T) {
 	if !ok {
 		t.Fatalf("Bad: %#v", in.Answer[0])
 	}
-	if ptrRec.Ptr != serviceCanonicalDNSName("db", "dc1", "custom", nil)+"." {
+	if ptrRec.Ptr != serviceCanonicalDNSName("db", "service", "dc1", "custom", nil)+"." {
 		t.Fatalf("Bad: %#v", ptrRec)
 	}
 }
@@ -1192,7 +1192,7 @@ func TestDNS_ServiceReverseLookupNodeAddress(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 				Address: "127.0.0.1",
 			},
@@ -1427,7 +1427,7 @@ func TestDNS_ServiceLookup(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -1581,14 +1581,14 @@ func TestDNS_ServiceLookupWithInternalServiceAddress(t *testing.T) {
 			Target:   "foo.node.dc1.consul.",
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer, "answer")
 	wantExtra := []dns.RR{
 		&dns.A{
 			Hdr: dns.RR_Header{Name: "foo.node.dc1.consul.", Rrtype: 0x1, Class: 0x1, Rdlength: 0x4},
 			A:   []byte{0x7f, 0x0, 0x0, 0x1}, // 127.0.0.1
 		},
 	}
-	verify.Values(t, "extra", in.Extra, wantExtra)
+	require.Equal(t, wantExtra, in.Extra, "extra")
 }
 
 func TestDNS_ConnectServiceLookup(t *testing.T) {
@@ -1975,7 +1975,7 @@ func TestDNS_NSRecords(t *testing.T) {
 			Ns:  "server1.node.dc1.consul.",
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer, "answer")
 	wantExtra := []dns.RR{
 		&dns.A{
 			Hdr: dns.RR_Header{Name: "server1.node.dc1.consul.", Rrtype: dns.TypeA, Class: dns.ClassINET, Rdlength: 0x4, Ttl: 0},
@@ -1983,7 +1983,7 @@ func TestDNS_NSRecords(t *testing.T) {
 		},
 	}
 
-	verify.Values(t, "extra", in.Extra, wantExtra)
+	require.Equal(t, wantExtra, in.Extra, "extra")
 }
 
 func TestDNS_NSRecords_IPV6(t *testing.T) {
@@ -2011,7 +2011,7 @@ func TestDNS_NSRecords_IPV6(t *testing.T) {
 			Ns:  "server1.node.dc1.consul.",
 		},
 	}
-	verify.Values(t, "answer", in.Answer, wantAnswer)
+	require.Equal(t, wantAnswer, in.Answer, "answer")
 	wantExtra := []dns.RR{
 		&dns.AAAA{
 			Hdr:  dns.RR_Header{Name: "server1.node.dc1.consul.", Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Rdlength: 0x10, Ttl: 0},
@@ -2019,7 +2019,7 @@ func TestDNS_NSRecords_IPV6(t *testing.T) {
 		},
 	}
 
-	verify.Values(t, "extra", in.Extra, wantExtra)
+	require.Equal(t, wantExtra, in.Extra, "extra")
 
 }
 
@@ -2164,7 +2164,7 @@ func TestDNS_ServiceLookup_ServiceAddress_A(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Address: "127.0.0.2",
 				Port:    12345,
 			},
@@ -2267,7 +2267,7 @@ func TestDNS_ServiceLookup_ServiceAddress_SRV(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Address: "www.google.com",
 				Port:    12345,
 			},
@@ -2364,7 +2364,7 @@ func TestDNS_ServiceLookup_ServiceAddressIPV6(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Address: "2607:20:4005:808::200e",
 				Port:    12345,
 			},
@@ -2497,13 +2497,13 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 	}
 
 	cases := map[string]testCase{
-		"node-addr-from-dc1": testCase{
+		"node-addr-from-dc1": {
 			dnsAddr:         a1.config.DNSAddrs[0].String(),
 			expectedPort:    8080,
 			expectedAddress: "127.0.0.1",
 			expectedARRName: "foo.node.dc2.consul.",
 		},
-		"node-wan-from-dc1": testCase{
+		"node-wan-from-dc1": {
 			dnsAddr: a1.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
@@ -2512,7 +2512,7 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 			expectedAddress: "127.0.0.2",
 			expectedARRName: "7f000002.addr.dc2.consul.",
 		},
-		"service-addr-from-dc1": testCase{
+		"service-addr-from-dc1": {
 			dnsAddr: a1.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
@@ -2522,14 +2522,14 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 			expectedAddress: "10.0.1.1",
 			expectedARRName: "0a000101.addr.dc2.consul.",
 		},
-		"service-wan-from-dc1": testCase{
+		"service-wan-from-dc1": {
 			dnsAddr: a1.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
 			},
 			serviceAddress: "10.0.1.1",
 			serviceTaggedAddresses: map[string]structs.ServiceAddress{
-				"wan": structs.ServiceAddress{
+				"wan": {
 					Address: "198.18.0.1",
 					Port:    80,
 				},
@@ -2538,13 +2538,13 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 			expectedAddress: "198.18.0.1",
 			expectedARRName: "c6120001.addr.dc2.consul.",
 		},
-		"node-addr-from-dc2": testCase{
+		"node-addr-from-dc2": {
 			dnsAddr:         a2.config.DNSAddrs[0].String(),
 			expectedPort:    8080,
 			expectedAddress: "127.0.0.1",
 			expectedARRName: "foo.node.dc2.consul.",
 		},
-		"node-wan-from-dc2": testCase{
+		"node-wan-from-dc2": {
 			dnsAddr: a2.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
@@ -2553,7 +2553,7 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 			expectedAddress: "127.0.0.1",
 			expectedARRName: "foo.node.dc2.consul.",
 		},
-		"service-addr-from-dc2": testCase{
+		"service-addr-from-dc2": {
 			dnsAddr: a2.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
@@ -2563,14 +2563,14 @@ func TestDNS_ServiceLookup_WanTranslation(t *testing.T) {
 			expectedAddress: "10.0.1.1",
 			expectedARRName: "0a000101.addr.dc2.consul.",
 		},
-		"service-wan-from-dc2": testCase{
+		"service-wan-from-dc2": {
 			dnsAddr: a2.config.DNSAddrs[0].String(),
 			nodeTaggedAddresses: map[string]string{
 				"wan": "127.0.0.2",
 			},
 			serviceAddress: "10.0.1.1",
 			serviceTaggedAddresses: map[string]structs.ServiceAddress{
-				"wan": structs.ServiceAddress{
+				"wan": {
 					Address: "198.18.0.1",
 					Port:    80,
 				},
@@ -2686,7 +2686,7 @@ func TestDNS_Lookup_TaggedIPAddresses(t *testing.T) {
 	}
 
 	cases := map[string]testCase{
-		"simple-ipv4": testCase{
+		"simple-ipv4": {
 			serviceAddress: "127.0.0.2",
 			nodeAddress:    "127.0.0.1",
 
@@ -2695,7 +2695,7 @@ func TestDNS_Lookup_TaggedIPAddresses(t *testing.T) {
 			expectedNodeIPv4Address:    "127.0.0.1",
 			expectedNodeIPv6Address:    "",
 		},
-		"simple-ipv6": testCase{
+		"simple-ipv6": {
 			serviceAddress: "::2",
 			nodeAddress:    "::1",
 
@@ -2704,7 +2704,7 @@ func TestDNS_Lookup_TaggedIPAddresses(t *testing.T) {
 			expectedNodeIPv6Address:    "::1",
 			expectedNodeIPv4Address:    "",
 		},
-		"ipv4-with-tagged-ipv6": testCase{
+		"ipv4-with-tagged-ipv6": {
 			serviceAddress: "127.0.0.2",
 			nodeAddress:    "127.0.0.1",
 
@@ -2720,7 +2720,7 @@ func TestDNS_Lookup_TaggedIPAddresses(t *testing.T) {
 			expectedNodeIPv4Address:    "127.0.0.1",
 			expectedNodeIPv6Address:    "::1",
 		},
-		"ipv6-with-tagged-ipv4": testCase{
+		"ipv6-with-tagged-ipv4": {
 			serviceAddress: "::2",
 			nodeAddress:    "::1",
 
@@ -2855,7 +2855,7 @@ func TestDNS_CaseInsensitiveServiceLookup(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "Db",
-				Tags:    []string{"Master"},
+				Tags:    []string{"Primary"},
 				Port:    12345,
 			},
 		}
@@ -2886,9 +2886,9 @@ func TestDNS_CaseInsensitiveServiceLookup(t *testing.T) {
 
 	// Try some variations to make sure case doesn't matter.
 	questions := []string{
-		"master.db.service.consul.",
-		"mASTER.dB.service.consul.",
-		"MASTER.dB.service.consul.",
+		"primary.db.service.consul.",
+		"pRIMARY.dB.service.consul.",
+		"PRIMARY.dB.service.consul.",
 		"db.service.consul.",
 		"DB.service.consul.",
 		"Db.service.consul.",
@@ -2925,7 +2925,7 @@ func TestDNS_ServiceLookup_TagPeriod(t *testing.T) {
 		Address:    "127.0.0.1",
 		Service: &structs.NodeService{
 			Service: "db",
-			Tags:    []string{"v1.master"},
+			Tags:    []string{"v1.primary"},
 			Port:    12345,
 		},
 	}
@@ -2936,7 +2936,7 @@ func TestDNS_ServiceLookup_TagPeriod(t *testing.T) {
 	}
 
 	m1 := new(dns.Msg)
-	m1.SetQuestion("v1.master2.db.service.consul.", dns.TypeSRV)
+	m1.SetQuestion("v1.primary2.db.service.consul.", dns.TypeSRV)
 
 	c1 := new(dns.Client)
 	in, _, err := c1.Exchange(m1, a.DNSAddr())
@@ -2949,7 +2949,7 @@ func TestDNS_ServiceLookup_TagPeriod(t *testing.T) {
 	}
 
 	m := new(dns.Msg)
-	m.SetQuestion("v1.master.db.service.consul.", dns.TypeSRV)
+	m.SetQuestion("v1.primary.db.service.consul.", dns.TypeSRV)
 
 	c := new(dns.Client)
 	in, _, err = c.Exchange(m, a.DNSAddr())
@@ -3320,7 +3320,7 @@ func TestDNS_ServiceLookup_Dedup(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -3337,7 +3337,7 @@ func TestDNS_ServiceLookup_Dedup(t *testing.T) {
 			Service: &structs.NodeService{
 				ID:      "db2",
 				Service: "db",
-				Tags:    []string{"slave"},
+				Tags:    []string{"replica"},
 				Port:    12345,
 			},
 		}
@@ -3352,7 +3352,7 @@ func TestDNS_ServiceLookup_Dedup(t *testing.T) {
 			Service: &structs.NodeService{
 				ID:      "db3",
 				Service: "db",
-				Tags:    []string{"slave"},
+				Tags:    []string{"replica"},
 				Port:    12346,
 			},
 		}
@@ -3423,7 +3423,7 @@ func TestDNS_ServiceLookup_Dedup_SRV(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -3440,7 +3440,7 @@ func TestDNS_ServiceLookup_Dedup_SRV(t *testing.T) {
 			Service: &structs.NodeService{
 				ID:      "db2",
 				Service: "db",
-				Tags:    []string{"slave"},
+				Tags:    []string{"replica"},
 				Port:    12345,
 			},
 		}
@@ -3455,7 +3455,7 @@ func TestDNS_ServiceLookup_Dedup_SRV(t *testing.T) {
 			Service: &structs.NodeService{
 				ID:      "db3",
 				Service: "db",
-				Tags:    []string{"slave"},
+				Tags:    []string{"replica"},
 				Port:    12346,
 			},
 		}
@@ -3671,7 +3671,7 @@ func TestDNS_ServiceLookup_FilterCritical(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3692,7 +3692,7 @@ func TestDNS_ServiceLookup_FilterCritical(t *testing.T) {
 			Address:    "127.0.0.2",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3711,7 +3711,7 @@ func TestDNS_ServiceLookup_FilterCritical(t *testing.T) {
 			Address:    "127.0.0.2",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3731,7 +3731,7 @@ func TestDNS_ServiceLookup_FilterCritical(t *testing.T) {
 			Address:    "127.0.0.3",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -3745,7 +3745,7 @@ func TestDNS_ServiceLookup_FilterCritical(t *testing.T) {
 			Address:    "127.0.0.4",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3827,7 +3827,7 @@ func TestDNS_ServiceLookup_OnlyFailing(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3848,7 +3848,7 @@ func TestDNS_ServiceLookup_OnlyFailing(t *testing.T) {
 			Address:    "127.0.0.2",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3867,7 +3867,7 @@ func TestDNS_ServiceLookup_OnlyFailing(t *testing.T) {
 			Address:    "127.0.0.2",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3944,7 +3944,7 @@ func TestDNS_ServiceLookup_OnlyPassing(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3966,7 +3966,7 @@ func TestDNS_ServiceLookup_OnlyPassing(t *testing.T) {
 			Address:    "127.0.0.2",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -3987,7 +3987,7 @@ func TestDNS_ServiceLookup_OnlyPassing(t *testing.T) {
 			Address:    "127.0.0.3",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 			Check: &structs.HealthCheck{
@@ -4052,7 +4052,7 @@ func TestDNS_ServiceLookup_OnlyPassing(t *testing.T) {
 
 	newCfg := *a.Config
 	newCfg.DNSOnlyPassing = false
-	err := a.ReloadConfig(&newCfg)
+	err := a.reloadConfigInternal(&newCfg)
 	require.NoError(t, err)
 
 	// only_passing is now false. we should now get two nodes
@@ -4394,7 +4394,7 @@ func TestDNS_ServiceLookup_LargeResponses(t *testing.T) {
 			Address:    fmt.Sprintf("127.0.0.%d", i+1),
 			Service: &structs.NodeService{
 				Service: longServiceName,
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -4414,7 +4414,7 @@ func TestDNS_ServiceLookup_LargeResponses(t *testing.T) {
 				Name: longServiceName,
 				Service: structs.ServiceQuery{
 					Service: longServiceName,
-					Tags:    []string{"master"},
+					Tags:    []string{"primary"},
 				},
 			},
 		}
@@ -4426,7 +4426,7 @@ func TestDNS_ServiceLookup_LargeResponses(t *testing.T) {
 
 	// Look up the service directly and via prepared query.
 	questions := []string{
-		"_" + longServiceName + "._master.service.consul.",
+		"_" + longServiceName + "._primary.service.consul.",
 		longServiceName + ".query.consul.",
 	}
 	for _, question := range questions {
@@ -4570,7 +4570,7 @@ func testDNSServiceLookupResponseLimits(t *testing.T, answerLimit int, qType uin
 }
 
 func checkDNSService(t *testing.T, generateNumNodes int, aRecordLimit int, qType uint16,
-	expectedResultsCount int, udpSize uint16, udpAnswerLimit int) error {
+	expectedResultsCount int, udpSize uint16) error {
 	a := NewTestAgent(t, `
 		node_name = "test-node"
 		dns_config {
@@ -4711,7 +4711,7 @@ func TestDNS_ServiceLookup_ARecordLimits(t *testing.T) {
 		for idx, qType := range queriesLimited {
 			t.Run(fmt.Sprintf("ARecordLimit %d qType: %d", idx, qType), func(t *testing.T) {
 				t.Parallel()
-				err := checkDNSService(t, test.numNodesTotal, test.aRecordLimit, qType, test.expectedAResults, test.udpSize, test.udpAnswerLimit)
+				err := checkDNSService(t, test.numNodesTotal, test.aRecordLimit, qType, test.expectedAResults, test.udpSize)
 				if err != nil {
 					t.Fatalf("Expected lookup %s to pass: %v", test.name, err)
 				}
@@ -4720,7 +4720,7 @@ func TestDNS_ServiceLookup_ARecordLimits(t *testing.T) {
 		// No limits but the size of records for SRV records, since not subject to randomization issues
 		t.Run("SRV lookup limitARecord", func(t *testing.T) {
 			t.Parallel()
-			err := checkDNSService(t, test.expectedSRVResults, test.aRecordLimit, dns.TypeSRV, test.numNodesTotal, test.udpSize, test.udpAnswerLimit)
+			err := checkDNSService(t, test.expectedSRVResults, test.aRecordLimit, dns.TypeSRV, test.numNodesTotal, test.udpSize)
 			if err != nil {
 				t.Fatalf("Expected service SRV lookup %s to pass: %v", test.name, err)
 			}
@@ -5140,7 +5140,7 @@ func TestDNS_ServiceLookup_TTL(t *testing.T) {
 			Address:    address,
 			Service: &structs.NodeService{
 				Service: service,
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345 + idx,
 			},
 		}
@@ -5219,7 +5219,7 @@ func TestDNS_PreparedQuery_TTL(t *testing.T) {
 			Address:    address,
 			Service: &structs.NodeService{
 				Service: service,
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345 + idx,
 			},
 		}
@@ -5438,7 +5438,7 @@ func TestDNS_ServiceLookup_SRV_RFC(t *testing.T) {
 		Address:    "127.0.0.1",
 		Service: &structs.NodeService{
 			Service: "db",
-			Tags:    []string{"master"},
+			Tags:    []string{"primary"},
 			Port:    12345,
 		},
 	}
@@ -5449,10 +5449,10 @@ func TestDNS_ServiceLookup_SRV_RFC(t *testing.T) {
 	}
 
 	questions := []string{
-		"_db._master.service.dc1.consul.",
-		"_db._master.service.consul.",
-		"_db._master.dc1.consul.",
-		"_db._master.consul.",
+		"_db._primary.service.dc1.consul.",
+		"_db._primary.service.consul.",
+		"_db._primary.dc1.consul.",
+		"_db._primary.consul.",
 	}
 
 	for _, question := range questions {
@@ -5513,7 +5513,7 @@ func TestDNS_ServiceLookup_SRV_RFC_TCP_Default(t *testing.T) {
 		Address:    "127.0.0.1",
 		Service: &structs.NodeService{
 			Service: "db",
-			Tags:    []string{"master"},
+			Tags:    []string{"primary"},
 			Port:    12345,
 		},
 	}
@@ -5641,7 +5641,7 @@ func TestDNS_ServiceLookup_MetaTXT(t *testing.T) {
 		},
 		Service: &structs.NodeService{
 			Service: "db",
-			Tags:    []string{"master"},
+			Tags:    []string{"primary"},
 			Port:    12345,
 		},
 	}
@@ -5670,7 +5670,7 @@ func TestDNS_ServiceLookup_MetaTXT(t *testing.T) {
 			Txt: []string{"key=value"},
 		},
 	}
-	verify.Values(t, "additional", in.Extra, wantAdditional)
+	require.Equal(t, wantAdditional, in.Extra)
 }
 
 func TestDNS_ServiceLookup_SuppressTXT(t *testing.T) {
@@ -5688,7 +5688,7 @@ func TestDNS_ServiceLookup_SuppressTXT(t *testing.T) {
 		},
 		Service: &structs.NodeService{
 			Service: "db",
-			Tags:    []string{"master"},
+			Tags:    []string{"primary"},
 			Port:    12345,
 		},
 	}
@@ -5713,7 +5713,7 @@ func TestDNS_ServiceLookup_SuppressTXT(t *testing.T) {
 			A:   []byte{0x7f, 0x0, 0x0, 0x1}, // 127.0.0.1
 		},
 	}
-	verify.Values(t, "additional", in.Extra, wantAdditional)
+	require.Equal(t, wantAdditional, in.Extra)
 }
 
 func TestDNS_AddressLookup(t *testing.T) {
@@ -5788,6 +5788,66 @@ func TestDNS_AddressLookupIPV6(t *testing.T) {
 		if aaaaRec.Hdr.Ttl != 0 {
 			t.Fatalf("Bad: %#v", in.Answer[0])
 		}
+	}
+}
+
+// TestDNS_NonExistentDC_Server verifies NXDOMAIN is returned when
+// Consul server agent is queried for a service in a non-existent
+// domain.
+func TestDNS_NonExistentDC_Server(t *testing.T) {
+	t.Parallel()
+	a := NewTestAgent(t, "")
+	defer a.Shutdown()
+	testrpc.WaitForLeader(t, a.RPC, "dc1")
+
+	m := new(dns.Msg)
+	m.SetQuestion("consul.service.dc2.consul.", dns.TypeANY)
+
+	c := new(dns.Client)
+	in, _, err := c.Exchange(m, a.DNSAddr())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	if in.Rcode != dns.RcodeNameError {
+		t.Fatalf("Expected RCode: %#v, had: %#v", dns.RcodeNameError, in.Rcode)
+	}
+}
+
+// TestDNS_NonExistentDC_RPC verifies NXDOMAIN is returned when
+// Consul server agent is queried over RPC by a non-server agent
+// for a service in a non-existent domain
+func TestDNS_NonExistentDC_RPC(t *testing.T) {
+	t.Parallel()
+	s := NewTestAgent(t, `
+		node_name = "test-server"
+	`)
+
+	defer s.Shutdown()
+	c := NewTestAgent(t, `
+		node_name = "test-client"
+		bootstrap = false
+		server = false
+	`)
+	defer c.Shutdown()
+
+	// Join LAN cluster
+	addr := fmt.Sprintf("127.0.0.1:%d", s.Config.SerfPortLAN)
+	_, err := c.JoinLAN([]string{addr})
+	require.NoError(t, err)
+	testrpc.WaitForTestAgent(t, c.RPC, "dc1")
+
+	m := new(dns.Msg)
+	m.SetQuestion("consul.service.dc2.consul.", dns.TypeANY)
+
+	d := new(dns.Client)
+	in, _, err := d.Exchange(m, c.DNSAddr())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	if in.Rcode != dns.RcodeNameError {
+		t.Fatalf("Expected RCode: %#v, had: %#v", dns.RcodeNameError, in.Rcode)
 	}
 }
 
@@ -5975,7 +6035,7 @@ func TestDNS_AltDomains_Service(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -6729,7 +6789,7 @@ func TestDNS_Compression_Query(t *testing.T) {
 			Address:    "127.0.0.1",
 			Service: &structs.NodeService{
 				Service: "db",
-				Tags:    []string{"master"},
+				Tags:    []string{"primary"},
 				Port:    12345,
 			},
 		}
@@ -6917,7 +6977,7 @@ func TestDNSInvalidRegex(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
-			if got, want := InvalidDnsRe.MatchString(test.in), test.invalid; got != want {
+			if got, want := agentdns.InvalidNameRe.MatchString(test.in), test.invalid; got != want {
 				t.Fatalf("Expected %v to return %v", test.in, want)
 			}
 		})
@@ -6997,7 +7057,7 @@ func TestDNS_ConfigReload(t *testing.T) {
 	newCfg.DNSSOA.Expire = 30
 	newCfg.DNSSOA.Minttl = 40
 
-	err := a.ReloadConfig(&newCfg)
+	err := a.reloadConfigInternal(&newCfg)
 	require.NoError(t, err)
 
 	for _, s := range a.dnsServers {
@@ -7078,7 +7138,7 @@ func TestDNS_ReloadConfig_DuringQuery(t *testing.T) {
 		// reload the config halfway through, that should not affect the ongoing query
 		newCfg := *a.Config
 		newCfg.DNSAllowStale = true
-		a.ReloadConfig(&newCfg)
+		a.reloadConfigInternal(&newCfg)
 
 		select {
 		case in := <-res:

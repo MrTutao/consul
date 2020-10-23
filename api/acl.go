@@ -37,6 +37,7 @@ type ACLToken struct {
 	Policies          []*ACLTokenPolicyLink `json:",omitempty"`
 	Roles             []*ACLTokenRoleLink   `json:",omitempty"`
 	ServiceIdentities []*ACLServiceIdentity `json:",omitempty"`
+	NodeIdentities    []*ACLNodeIdentity    `json:",omitempty"`
 	Local             bool
 	AuthMethod        string        `json:",omitempty"`
 	ExpirationTTL     time.Duration `json:",omitempty"`
@@ -49,7 +50,7 @@ type ACLToken struct {
 	Rules string `json:",omitempty"`
 
 	// Namespace is the namespace the ACLToken is associated with.
-	// Namespaces is a Consul Enterprise feature.
+	// Namespaces are a Consul Enterprise feature.
 	Namespace string `json:",omitempty"`
 }
 
@@ -61,6 +62,7 @@ type ACLTokenListEntry struct {
 	Policies          []*ACLTokenPolicyLink `json:",omitempty"`
 	Roles             []*ACLTokenRoleLink   `json:",omitempty"`
 	ServiceIdentities []*ACLServiceIdentity `json:",omitempty"`
+	NodeIdentities    []*ACLNodeIdentity    `json:",omitempty"`
 	Local             bool
 	AuthMethod        string     `json:",omitempty"`
 	ExpirationTime    *time.Time `json:",omitempty"`
@@ -105,6 +107,13 @@ type ACLServiceIdentity struct {
 	Datacenters []string `json:",omitempty"`
 }
 
+// ACLNodeIdentity represents a high-level grant of all necessary privileges
+// to assume the identity of the named Node in the Catalog and within Connect.
+type ACLNodeIdentity struct {
+	NodeName   string
+	Datacenter string
+}
+
 // ACLPolicy represents an ACL Policy.
 type ACLPolicy struct {
 	ID          string
@@ -144,6 +153,7 @@ type ACLRole struct {
 	Description       string
 	Policies          []*ACLRolePolicyLink  `json:",omitempty"`
 	ServiceIdentities []*ACLServiceIdentity `json:",omitempty"`
+	NodeIdentities    []*ACLNodeIdentity    `json:",omitempty"`
 	Hash              []byte
 	CreateIndex       uint64
 	ModifyIndex       uint64
@@ -186,6 +196,10 @@ type ACLAuthMethod struct {
 	DisplayName string        `json:",omitempty"`
 	Description string        `json:",omitempty"`
 	MaxTokenTTL time.Duration `json:",omitempty"`
+
+	// TokenLocality defines the kind of token that this auth method produces.
+	// This can be either 'local' or 'global'. If empty 'local' is assumed.
+	TokenLocality string `json:",omitempty"`
 
 	// Configuration is arbitrary configuration for the auth method. This
 	// should only contain primitive values and containers (such as lists and

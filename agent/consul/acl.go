@@ -99,6 +99,10 @@ func (id *missingIdentity) ServiceIdentityList() []*structs.ACLServiceIdentity {
 	return nil
 }
 
+func (id *missingIdentity) NodeIdentityList() []*structs.ACLNodeIdentity {
+	return nil
+}
+
 func (id *missingIdentity) IsExpired(asOf time.Time) bool {
 	return false
 }
@@ -136,7 +140,6 @@ func tokenSecretCacheID(token string) string {
 }
 
 type ACLResolverDelegate interface {
-	ACLsEnabled() bool
 	ACLDatacenter(legacy bool) string
 	UseLegacyACLs() bool
 	ResolveIdentityFromToken(token string) (bool, structs.ACLIdentity, error)
@@ -417,6 +420,9 @@ func (r *ACLResolver) fetchAndCacheIdentityFromToken(token string, cached *struc
 		if resp.Token == nil {
 			r.cache.PutIdentity(cacheID, nil)
 			return nil, acl.ErrNotFound
+		} else if resp.Token.Local && r.config.Datacenter != resp.SourceDatacenter {
+			r.cache.PutIdentity(cacheID, nil)
+			return nil, acl.PermissionDeniedError{Cause: fmt.Sprintf("This is a local token in datacenter %q", resp.SourceDatacenter)}
 		} else {
 			r.cache.PutIdentity(cacheID, resp.Token)
 			return resp.Token, nil
@@ -645,8 +651,9 @@ func (r *ACLResolver) resolvePoliciesForIdentity(identity structs.ACLIdentity) (
 	policyIDs := identity.PolicyIDs()
 	roleIDs := identity.RoleIDs()
 	serviceIdentities := identity.ServiceIdentityList()
+	nodeIdentities := identity.NodeIdentityList()
 
-	if len(policyIDs) == 0 && len(serviceIdentities) == 0 && len(roleIDs) == 0 {
+	if len(policyIDs) == 0 && len(serviceIdentities) == 0 && len(roleIDs) == 0 && len(nodeIdentities) == 0 {
 		policy := identity.EmbeddedPolicy()
 		if policy != nil {
 			return []*structs.ACLPolicy{policy}, nil
@@ -668,14 +675,17 @@ func (r *ACLResolver) resolvePoliciesForIdentity(identity structs.ACLIdentity) (
 			policyIDs = append(policyIDs, link.ID)
 		}
 		serviceIdentities = append(serviceIdentities, role.ServiceIdentities...)
+		nodeIdentities = append(nodeIdentities, role.NodeIdentityList()...)
 	}
 
 	// Now deduplicate any policies or service identities that occur more than once.
 	policyIDs = dedupeStringSlice(policyIDs)
 	serviceIdentities = dedupeServiceIdentities(serviceIdentities)
+	nodeIdentities = dedupeNodeIdentities(nodeIdentities)
 
 	// Generate synthetic policies for all service identities in effect.
 	syntheticPolicies := r.synthesizePoliciesForServiceIdentities(serviceIdentities, identity.EnterpriseMetadata())
+	syntheticPolicies = append(syntheticPolicies, r.synthesizePoliciesForNodeIdentities(nodeIdentities)...)
 
 	// For the new ACLs policy replication is mandatory for correct operation on servers. Therefore
 	// we only attempt to resolve policies locally
@@ -702,6 +712,19 @@ func (r *ACLResolver) synthesizePoliciesForServiceIdentities(serviceIdentities [
 	return syntheticPolicies
 }
 
+func (r *ACLResolver) synthesizePoliciesForNodeIdentities(nodeIdentities []*structs.ACLNodeIdentity) []*structs.ACLPolicy {
+	if len(nodeIdentities) == 0 {
+		return nil
+	}
+
+	syntheticPolicies := make([]*structs.ACLPolicy, 0, len(nodeIdentities))
+	for _, n := range nodeIdentities {
+		syntheticPolicies = append(syntheticPolicies, n.SyntheticPolicy())
+	}
+
+	return syntheticPolicies
+}
+
 func dedupeServiceIdentities(in []*structs.ACLServiceIdentity) []*structs.ACLServiceIdentity {
 	// From: https://github.com/golang/go/wiki/SliceTricks#in-place-deduplicate-comparable
 
@@ -722,6 +745,38 @@ func dedupeServiceIdentities(in []*structs.ACLServiceIdentity) []*structs.ACLSer
 			} else {
 				in[j].Datacenters = mergeStringSlice(in[j].Datacenters, in[i].Datacenters)
 			}
+			continue
+		}
+		j++
+		in[j] = in[i]
+	}
+
+	// Discard the skipped items.
+	for i := j + 1; i < len(in); i++ {
+		in[i] = nil
+	}
+
+	return in[:j+1]
+}
+
+func dedupeNodeIdentities(in []*structs.ACLNodeIdentity) []*structs.ACLNodeIdentity {
+	// From: https://github.com/golang/go/wiki/SliceTricks#in-place-deduplicate-comparable
+
+	if len(in) <= 1 {
+		return in
+	}
+
+	sort.Slice(in, func(i, j int) bool {
+		if in[i].NodeName < in[j].NodeName {
+			return true
+		}
+
+		return in[i].Datacenter < in[j].Datacenter
+	})
+
+	j := 0
+	for i := 1; i < len(in); i++ {
+		if in[j].NodeName == in[i].NodeName && in[j].Datacenter == in[i].Datacenter {
 			continue
 		}
 		j++
@@ -1140,7 +1195,7 @@ func (r *ACLResolver) ResolveTokenToIdentity(token string) (structs.ACLIdentity,
 
 func (r *ACLResolver) ACLsEnabled() bool {
 	// Whether we desire ACLs to be enabled according to configuration
-	if !r.delegate.ACLsEnabled() {
+	if !r.config.ACLsEnabled {
 		return false
 	}
 
@@ -1154,44 +1209,39 @@ func (r *ACLResolver) ACLsEnabled() bool {
 	return true
 }
 
-func (r *ACLResolver) GetMergedPolicyForToken(token string) (*acl.Policy, error) {
-	policies, err := r.resolveTokenToPolicies(token)
+func (r *ACLResolver) GetMergedPolicyForToken(token string) (structs.ACLIdentity, *acl.Policy, error) {
+	ident, policies, err := r.resolveTokenToIdentityAndPolicies(token)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(policies) == 0 {
-		return nil, acl.ErrNotFound
+		return nil, nil, acl.ErrNotFound
 	}
 
-	return policies.Merge(r.cache, r.aclConf)
+	policy, err := policies.Merge(r.cache, r.aclConf)
+	return ident, policy, err
 }
 
 // aclFilter is used to filter results from our state store based on ACL rules
 // configured for the provided token.
 type aclFilter struct {
-	authorizer      acl.Authorizer
-	logger          hclog.Logger
-	enforceVersion8 bool
+	authorizer acl.Authorizer
+	logger     hclog.Logger
 }
 
 // newACLFilter constructs a new aclFilter.
-func newACLFilter(authorizer acl.Authorizer, logger hclog.Logger, enforceVersion8 bool) *aclFilter {
+func newACLFilter(authorizer acl.Authorizer, logger hclog.Logger) *aclFilter {
 	if logger == nil {
 		logger = hclog.New(&hclog.LoggerOptions{})
 	}
 	return &aclFilter{
-		authorizer:      authorizer,
-		logger:          logger,
-		enforceVersion8: enforceVersion8,
+		authorizer: authorizer,
+		logger:     logger,
 	}
 }
 
 // allowNode is used to determine if a node is accessible for an ACL.
 func (f *aclFilter) allowNode(node string, ent *acl.AuthorizerContext) bool {
-	if !f.enforceVersion8 {
-		return true
-	}
-
 	return f.authorizer.NodeRead(node, ent) == acl.Allow
 }
 
@@ -1201,12 +1251,12 @@ func (f *aclFilter) allowGateway(gs *structs.GatewayService) bool {
 
 	// Need read on service and gateway. Gateway may have different EnterpriseMeta so we fill authzContext twice
 	gs.Gateway.FillAuthzContext(&authzContext)
-	if !f.allowService(gs.Gateway.ID, &authzContext) {
+	if !f.allowService(gs.Gateway.Name, &authzContext) {
 		return false
 	}
 
 	gs.Service.FillAuthzContext(&authzContext)
-	if !f.allowService(gs.Service.ID, &authzContext) {
+	if !f.allowService(gs.Service.Name, &authzContext) {
 		return false
 	}
 	return true
@@ -1218,18 +1268,12 @@ func (f *aclFilter) allowService(service string, ent *acl.AuthorizerContext) boo
 		return true
 	}
 
-	if !f.enforceVersion8 && service == structs.ConsulServiceID {
-		return true
-	}
 	return f.authorizer.ServiceRead(service, ent) == acl.Allow
 }
 
 // allowSession is used to determine if a session for a node is accessible for
 // an ACL.
 func (f *aclFilter) allowSession(node string, ent *acl.AuthorizerContext) bool {
-	if !f.enforceVersion8 {
-		return true
-	}
 	return f.authorizer.SessionRead(node, ent) == acl.Allow
 }
 
@@ -1365,11 +1409,23 @@ func (f *aclFilter) filterCheckServiceNodes(nodes *structs.CheckServiceNodes) {
 	*nodes = csn
 }
 
+// filterServiceTopology is used to filter upstreams/downstreams based on ACL rules.
+// this filter is unlike others in that it also returns whether the result was filtered by ACLs
+func (f *aclFilter) filterServiceTopology(topology *structs.ServiceTopology) bool {
+	numUp := len(topology.Upstreams)
+	numDown := len(topology.Downstreams)
+
+	f.filterCheckServiceNodes(&topology.Upstreams)
+	f.filterCheckServiceNodes(&topology.Downstreams)
+
+	return numUp != len(topology.Upstreams) || numDown != len(topology.Downstreams)
+}
+
 // filterDatacenterCheckServiceNodes is used to filter nodes based on ACL rules.
 func (f *aclFilter) filterDatacenterCheckServiceNodes(datacenterNodes *map[string]structs.CheckServiceNodes) {
 	dn := *datacenterNodes
 	out := make(map[string]structs.CheckServiceNodes)
-	for dc, _ := range dn {
+	for dc := range dn {
 		nodes := dn[dc]
 		f.filterCheckServiceNodes(&nodes)
 		if len(nodes) > 0 {
@@ -1779,7 +1835,7 @@ func (f *aclFilter) filterGatewayServices(mappings *structs.GatewayServices) {
 		var authzContext acl.AuthorizerContext
 		s.Service.FillAuthzContext(&authzContext)
 
-		if f.authorizer.ServiceRead(s.Service.ID, &authzContext) != acl.Allow {
+		if f.authorizer.ServiceRead(s.Service.Name, &authzContext) != acl.Allow {
 			f.logger.Debug("dropping service from result due to ACLs", "service", s.Service.String())
 			continue
 		}
@@ -1793,7 +1849,7 @@ func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj in
 		return nil
 	}
 	// Create the filter
-	filt := newACLFilter(authorizer, r.logger, r.config.ACLEnforceVersion8)
+	filt := newACLFilter(authorizer, r.logger)
 
 	switch v := subj.(type) {
 	case *structs.CheckServiceNodes:
@@ -1801,6 +1857,12 @@ func (r *ACLResolver) filterACLWithAuthorizer(authorizer acl.Authorizer, subj in
 
 	case *structs.IndexedCheckServiceNodes:
 		filt.filterCheckServiceNodes(&v.Nodes)
+
+	case *structs.IndexedServiceTopology:
+		filtered := filt.filterServiceTopology(v.ServiceTopology)
+		if filtered {
+			v.FilteredByACLs = true
+		}
 
 	case *structs.DatacenterIndexedCheckServiceNodes:
 		filt.filterDatacenterCheckServiceNodes(&v.DatacenterNodes)
@@ -2099,7 +2161,7 @@ func vetNodeTxnOp(op *structs.TxnNodeOp, rule acl.Authorizer) error {
 	var authzContext acl.AuthorizerContext
 	op.FillAuthzContext(&authzContext)
 
-	if rule != nil && rule.NodeWrite(op.Node.Node, &authzContext) != acl.Allow {
+	if rule.NodeWrite(op.Node.Node, &authzContext) != acl.Allow {
 		return acl.ErrPermissionDenied
 	}
 

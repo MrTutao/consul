@@ -18,7 +18,7 @@ instance, Consul 1.3 introduced a new field in the Connect block of the [service
 definition](/docs/agent/services).
 
 To deploy a service and sidecar proxy locally, complete the
-[Getting Started guide](https://learn.hashicorp.com/consul/getting-started/connect?utm_source=consul.io&utm_medium=docs).
+[Getting Started guide](https://learn.hashicorp.com/tutorials/consul/get-started-service-networking?utm_source=consul.io&utm_medium=docs).
 
 The `connect.sidecar_service` field is a complete nested service definition on
 which almost any regular service definition field can be set. The exceptions are
@@ -180,7 +180,7 @@ service's ID. This enables the following behavior.
   - If a service registration removes the nested `sidecar_service` then the
     previously registered sidecar for that service will be deregistered
     automatically.
-- When reloading the configuration files, if a service definition changes it's
+- When reloading the configuration files, if a service definition changes its
   ID, then a new service instance _and_ a new sidecar instance will be
   registered. The old ones will be removed since they are no longer found in
   the config files.

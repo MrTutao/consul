@@ -3,55 +3,36 @@
 package envoy
 
 import (
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestEnvoy(t *testing.T) {
-	var testcases = []string{
-		"case-badauthz",
-		"case-basic",
-		"case-centralconf",
-		"case-cfg-resolver-dc-failover-gateways-none",
-		"case-cfg-resolver-dc-failover-gateways-remote",
-		"case-cfg-resolver-defaultsubset",
-		"case-cfg-resolver-subset-onlypassing",
-		"case-cfg-resolver-subset-redirect",
-		"case-cfg-resolver-svc-failover",
-		"case-cfg-resolver-svc-redirect-http",
-		"case-cfg-resolver-svc-redirect-tcp",
-		"case-consul-exec",
-		"case-dogstatsd-udp",
-		"case-gateways-local",
-		"case-gateways-remote",
-		"case-gateway-without-services",
-		"case-grpc",
-		"case-http",
-		"case-http2",
-		"case-http-badauthz",
-		"case-ingress-gateway-http",
-		"case-ingress-gateway-multiple-services",
-		"case-ingress-gateway-simple",
-		"case-ingress-mesh-gateways-resolver",
-		"case-multidc-rsa-ca",
-		"case-prometheus",
-		"case-statsd-udp",
-		"case-stats-proxy",
-		"case-terminating-gateway-simple",
-		"case-terminating-gateway-subsets",
-		"case-terminating-gateway-without-services",
-		"case-upstream-config",
-		"case-wanfed-gw",
-		"case-zipkin",
-	}
+	testcases, err := discoverCases()
+	require.NoError(t, err)
 
 	runCmd(t, "suite_setup")
 	defer runCmd(t, "suite_teardown")
 
 	for _, tc := range testcases {
 		t.Run(tc, func(t *testing.T) {
-			runCmd(t, "run_tests", "CASE_DIR="+tc)
+			caseDir := "CASE_DIR=" + tc
+
+			t.Cleanup(func() {
+				if t.Failed() {
+					runCmd(t, "capture_logs", caseDir)
+				}
+
+				runCmd(t, "test_teardown", caseDir)
+			})
+
+			runCmd(t, "run_tests", caseDir)
 		})
 	}
 }
@@ -66,4 +47,27 @@ func runCmd(t *testing.T, c string, env ...string) {
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("command failed: %v", err)
 	}
+}
+
+// Discover the cases so we pick up both oss and ent copies.
+func discoverCases() ([]string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+
+	dirs, err := ioutil.ReadDir(cwd)
+	if err != nil {
+		return nil, err
+	}
+
+	var out []string
+	for _, fi := range dirs {
+		if fi.IsDir() && strings.HasPrefix(fi.Name(), "case-") {
+			out = append(out, fi.Name())
+		}
+	}
+
+	sort.Strings(out)
+	return out, nil
 }

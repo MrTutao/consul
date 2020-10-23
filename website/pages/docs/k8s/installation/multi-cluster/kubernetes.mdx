@@ -10,11 +10,11 @@ description: >-
 
 -> **1.8.0+:** This feature is available in Consul versions 1.8.0 and higher
 
-~> This topic requires familiarity with [Mesh Gateways](/docs/connect/mesh_gateway) and [WAN Federation Via Mesh Gateways](/docs/connect/wan-federation-via-mesh-gateways).
+~> This topic requires familiarity with [Mesh Gateways](/docs/connect/mesh-gateway) and [WAN Federation Via Mesh Gateways](/docs/connect/gateways/wan-federation-via-mesh-gateways).
 
--> Looking for a step-by-step guide? Please follow our Learn Guide: [Secure and Route Service Mesh Communication Across Kubernetes](https://learn.hashicorp.com/consul/kubernetes/mesh-gateways).
+-> Looking for a step-by-step guide? Please follow our Learn tutorial: [Secure and Route Service Mesh Communication Across Kubernetes](https://learn.hashicorp.com/tutorials/consul/kubernetes-mesh-gateways).
 
-This page describes how to federate multiple Kubernetes clusters. See [Multi-Cluster Overview](/docs/k8s/installation/multi-cluster/overview)
+This page describes how to federate multiple Kubernetes clusters. See [Multi-Cluster Overview](/docs/k8s/installation/multi-cluster)
 for more information on use-cases and how it works.
 
 ## Primary Datacenter
@@ -38,7 +38,6 @@ with the possible modifications listed below.
 ```yaml
 global:
   name: consul
-  image: consul:1.8.0-beta1
   datacenter: dc1
 
   # TLS configures whether Consul components use TLS.
@@ -78,12 +77,6 @@ meshGateway:
 
 Modifications:
 
-1. Note the Docker image:
-   ```yaml
-   global:
-     image: consul:1.8.0-beta1
-   ```
-   Kubernetes support for federation is currently only available in Consul 1.8.0 beta.
 1. The Consul datacenter name is `dc1`. The datacenter name in each federated
    cluster **must be unique**.
 1. ACLs are enabled in the above config file. They can be disabled by setting:
@@ -120,9 +113,11 @@ Modifications:
    mesh gateway, for example using a Node Port service or a custom DNS entry,
    see the [Helm reference](/docs/k8s/helm#v-meshgateway) for that setting.
 
-With your `config.yaml` ready to go, follow our [Installation Guide](/docs/k8s/installation/overview
+With your `config.yaml` ready to go, follow our [Installation Guide](/docs/k8s/installation/install)
 to install Consul on your primary cluster and then skip ahead to the [Federation Secret](#federation-secret)
 section.
+
+-> **NOTE:** You must be using consul-helm 0.21.0+. To update, run `helm repo update`.
 
 #### Upgrading An Existing Cluster
 
@@ -131,7 +126,6 @@ the following config:
 
 ```yaml
 global:
-  image: consul:1.8.0-beta1
   tls:
     enabled: true
   federation:
@@ -144,8 +138,6 @@ meshGateway:
   enabled: true
 ```
 
-1. `global.image` must be set to `consul:1.8.0-beta1` because Kubernetes support
-   for federation is currently only available in Consul 1.8.0 beta.
 1. `global.tls.enabled` must be `true`. See [Configuring TLS on an Existing Cluster](/docs/k8s/operations/tls-on-existing-cluster)
    for more information on safely upgrading a cluster to use TLS.
 
@@ -160,8 +152,10 @@ If you've set `enableAutoEncrypt: true`, this is also supported.
    creates a Kubernetes Load Balancer service. If you wish to customize the
    mesh gateway, see the [Helm reference](/docs/k8s/helm#v-meshgateway) for that setting.
 
-With the above settings added to your existing config, follow the [Upgrading](/localhost:3000/docs/k8s/operations/upgrading)
+With the above settings added to your existing config, follow the [Upgrading](/docs/k8s/operations/upgrading)
 guide to upgrade your cluster and then come back to the [Federation Secret](#federation-secret) section.
+
+-> **NOTE:** You must be using consul-helm 0.21.0+. To update, run `helm repo update`.
 
 ## Federation Secret
 
@@ -178,15 +172,15 @@ global:
 After the installation into your primary cluster you will need to export
 this secret:
 
-```sh
+```shell-session
 $ kubectl get secret consul-federation -o yaml > consul-federation-secret.yaml
 ```
 
 !> **Security note:** The federation secret makes it possible to gain
-   full admin privileges in Consul. This secret must be kept securely, i.e.
-   it should be deleted from your filesystem after importing it to your secondary
-   cluster and you should use RBAC permissions to ensure only administrators
-   can read it from Kubernetes.
+full admin privileges in Consul. This secret must be kept securely, i.e.
+it should be deleted from your filesystem after importing it to your secondary
+cluster and you should use RBAC permissions to ensure only administrators
+can read it from Kubernetes.
 
 ~> **Secret doesn't exist?** If you haven't set `global.name` to `consul` then the name of the secret will
 be your Helm release name suffixed with `-consul-federation` e.g. `helm-release-consul-federation`.
@@ -196,14 +190,14 @@ Now you're ready to import the secret into your secondary cluster(s).
 Switch `kubectl` context to your secondary Kubernetes cluster. In this example
 our context for our secondary cluster is `dc2`:
 
-```sh
+```shell-session
 $ kubectl config use-context dc2
 Switched to context "dc2".
 ```
 
 And import the secret:
 
-```sh
+```shell-session
 $ kubectl apply -f consul-federation-secret.yaml
 secret/consul-federation configured
 ```
@@ -222,11 +216,12 @@ The automatically generated federation secret contains:
 
   !> **Security note:** The certificate authority key would enable an attacker to compromise Consul,
   it should be kept securely.
+
 - **Consul server config** - This is a JSON snippet that must be used as part of the server config for secondary datacenters.
   It sets:
 
-  - [`primary_datacenter`](/docs/agent/options.html#primary_datacenter) to the name of the primary datacenter.
-  - [`primary_gateways`](/docs/agent/options.html#primary_gateways) to an array of IPs or hostnames
+  - [`primary_datacenter`](/docs/agent/options#primary_datacenter) to the name of the primary datacenter.
+  - [`primary_gateways`](/docs/agent/options#primary_gateways) to an array of IPs or hostnames
     for the mesh gateways in the primary datacenter. These are the addresses that
     Consul servers in secondary clusters will use to communicate with the primary
     datacenter.
@@ -249,7 +244,7 @@ The automatically generated federation secret contains:
 
 ## Secondary Cluster(s)
 
-With the primary cluster up and running, and the [federation secret](/docs/installation/multi-cluster#federation-secret) imported
+With the primary cluster up and running, and the [federation secret](#federation-secret) imported
 into the secondary cluster, we can now install Consul into the secondary
 cluster.
 
@@ -262,7 +257,6 @@ settings are different.
 ```yaml
 global:
   name: consul
-  image: consul:1.8.0-beta1
   datacenter: dc2
   tls:
     enabled: true
@@ -309,8 +303,6 @@ server:
 
 Modifications:
 
-1. Note `global.image: consul:1.8.0-beta1`. Kubernetes support for federation is currently only available
-   in Consul 1.8.0 beta.
 1. The Consul datacenter name is `dc2`. The primary datacenter's name was `dc1`.
    The datacenter name in **each** federated cluster **must be unique**.
 1. ACLs are enabled in the above config file. They can be disabled by removing
@@ -345,7 +337,7 @@ Modifications:
    mesh gateway, for example using a Node Port service or a custom DNS entry,
    see the [Helm reference](/docs/k8s/helm#v-meshgateway) for that setting.
 
-With your `config.yaml` ready to go, follow our [Installation Guide](/docs/k8s/installation/overview)
+With your `config.yaml` ready to go, follow our [Installation Guide](/docs/k8s/installation/install)
 to install Consul on your secondary cluster(s).
 
 ## Verifying Federation
@@ -353,7 +345,7 @@ to install Consul on your secondary cluster(s).
 To verify that both datacenters are federated, run the
 `consul members -wan` command on one of the Consul server pods:
 
-```sh
+```shell-session
 $ kubectl exec statefulset/consul-server -- consul members -wan
 Node                 Address              Status  Type    Build     Protocol  DC   Segment
 consul-server-0.dc1  10.32.4.216:8302     alive   server  1.8.0  2         dc1  <all>
@@ -371,7 +363,7 @@ You can also use the `consul catalog services` command with the `-datacenter` fl
 each datacenter can read each other's services. In this example, our `kubectl`
 context is `dc1` and we're querying for the list of services in `dc2`:
 
-```sh
+```shell-session
 $ kubectl exec statefulset/consul-server -- consul catalog services -datacenter dc2
 consul
 mesh-gateway
@@ -383,7 +375,7 @@ You can switch kubectl contexts and run the same command in `dc2` with the flag
 ### Consul UI
 
 We can also use the Consul UI to verify federation.
-See [Viewing the Consul UI](docs/k8s/installation/overview#viewing-the-consul-ui)
+See [Viewing the Consul UI](/docs/k8s/installation/install#viewing-the-consul-ui)
 for instructions on how to view the UI.
 
 ~> NOTE: If ACLs are enabled, your kubectl context must be in the primary datacenter
@@ -397,6 +389,6 @@ in the top left:
 ## Next Steps
 
 With your Kubernetes clusters federated, try out using Consul service mesh to
-route between services deployed on each cluster by following our Learn Guide: [Secure and Route Service Mesh Communication Across Kubernetes](https://learn.hashicorp.com/consul/kubernetes/mesh-gateways#deploy-microservices).
+route between services deployed on each cluster by following our Learn tutorial: [Secure and Route Service Mesh Communication Across Kubernetes](https://learn.hashicorp.com/tutorials/consul/kubernetes-mesh-gateways#deploy-microservices).
 
 You can also read our in-depth documentation on [Consul Service Mesh In Kubernetes](/docs/k8s/connect).

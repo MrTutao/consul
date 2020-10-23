@@ -8,12 +8,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/consul/agent/cache"
-	"github.com/hashicorp/consul/api"
-	"github.com/hashicorp/consul/sdk/testutil"
-	"github.com/hashicorp/consul/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/hashicorp/consul/acl"
+	"github.com/hashicorp/consul/agent/cache"
+	"github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/sdk/testutil"
+	"github.com/hashicorp/consul/types"
 )
 
 func TestEncodeDecode(t *testing.T) {
@@ -148,11 +151,11 @@ func testServiceNode(t *testing.T) *ServiceNode {
 		ServiceTags:    []string{"prod", "v1"},
 		ServiceAddress: "127.0.0.2",
 		ServiceTaggedAddresses: map[string]ServiceAddress{
-			"lan": ServiceAddress{
+			"lan": {
 				Address: "127.0.0.2",
 				Port:    8080,
 			},
-			"wan": ServiceAddress{
+			"wan": {
 				Address: "198.18.0.1",
 				Port:    80,
 			},
@@ -171,6 +174,46 @@ func testServiceNode(t *testing.T) *ServiceNode {
 			Native: true,
 		},
 	}
+}
+
+func TestRegisterRequest_UnmarshalJSON_WithConnectNilDoesNotPanic(t *testing.T) {
+	in := `
+{
+    "ID": "",
+    "Node": "k8s-sync",
+    "Address": "127.0.0.1",
+    "TaggedAddresses": null,
+    "NodeMeta": {
+        "external-source": "kubernetes"
+    },
+    "Datacenter": "",
+    "Service": {
+        "Kind": "",
+        "ID": "test-service-f8fd5f0f4e6c",
+        "Service": "test-service",
+        "Tags": [
+            "k8s"
+        ],
+        "Meta": {
+            "external-k8s-ns": "",
+            "external-source": "kubernetes",
+            "port-stats": "18080"
+        },
+        "Port": 8080,
+        "Address": "192.0.2.10",
+        "EnableTagOverride": false,
+        "CreateIndex": 0,
+        "ModifyIndex": 0,
+        "Connect": null
+    },
+    "Check": null,
+    "SkipNodeUpdate": true
+}
+`
+
+	var req RegisterRequest
+	err := lib.DecodeJSON(strings.NewReader(in), &req)
+	require.NoError(t, err)
 }
 
 func TestNode_IsSame(t *testing.T) {
@@ -367,36 +410,36 @@ func TestStructs_NodeService_ValidateMeshGateway(t *testing.T) {
 		Err    string
 	}
 	cases := map[string]testCase{
-		"valid": testCase{
+		"valid": {
 			func(x *NodeService) {},
 			"",
 		},
-		"zero-port": testCase{
+		"zero-port": {
 			func(x *NodeService) { x.Port = 0 },
 			"Port must be non-zero",
 		},
-		"sidecar-service": testCase{
+		"sidecar-service": {
 			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
 			"cannot have a sidecar service",
 		},
-		"proxy-destination-name": testCase{
+		"proxy-destination-name": {
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
 			"Proxy.DestinationServiceName configuration is invalid",
 		},
-		"proxy-destination-id": testCase{
+		"proxy-destination-id": {
 			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
 			"Proxy.DestinationServiceID configuration is invalid",
 		},
-		"proxy-local-address": testCase{
+		"proxy-local-address": {
 			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
 			"Proxy.LocalServiceAddress configuration is invalid",
 		},
-		"proxy-local-port": testCase{
+		"proxy-local-port": {
 			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
 			"Proxy.LocalServicePort configuration is invalid",
 		},
-		"proxy-upstreams": testCase{
-			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+		"proxy-upstreams": {
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{{}} },
 			"Proxy.Upstreams configuration is invalid",
 		},
 	}
@@ -423,32 +466,32 @@ func TestStructs_NodeService_ValidateTerminatingGateway(t *testing.T) {
 	}
 
 	cases := map[string]testCase{
-		"valid": testCase{
+		"valid": {
 			func(x *NodeService) {},
 			"",
 		},
-		"sidecar-service": testCase{
+		"sidecar-service": {
 			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
 			"cannot have a sidecar service",
 		},
-		"proxy-destination-name": testCase{
+		"proxy-destination-name": {
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
 			"Proxy.DestinationServiceName configuration is invalid",
 		},
-		"proxy-destination-id": testCase{
+		"proxy-destination-id": {
 			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
 			"Proxy.DestinationServiceID configuration is invalid",
 		},
-		"proxy-local-address": testCase{
+		"proxy-local-address": {
 			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
 			"Proxy.LocalServiceAddress configuration is invalid",
 		},
-		"proxy-local-port": testCase{
+		"proxy-local-port": {
 			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
 			"Proxy.LocalServicePort configuration is invalid",
 		},
-		"proxy-upstreams": testCase{
-			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+		"proxy-upstreams": {
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{{}} },
 			"Proxy.Upstreams configuration is invalid",
 		},
 	}
@@ -476,32 +519,32 @@ func TestStructs_NodeService_ValidateIngressGateway(t *testing.T) {
 	}
 
 	cases := map[string]testCase{
-		"valid": testCase{
+		"valid": {
 			func(x *NodeService) {},
 			"",
 		},
-		"sidecar-service": testCase{
+		"sidecar-service": {
 			func(x *NodeService) { x.Connect.SidecarService = &ServiceDefinition{} },
 			"cannot have a sidecar service",
 		},
-		"proxy-destination-name": testCase{
+		"proxy-destination-name": {
 			func(x *NodeService) { x.Proxy.DestinationServiceName = "foo" },
 			"Proxy.DestinationServiceName configuration is invalid",
 		},
-		"proxy-destination-id": testCase{
+		"proxy-destination-id": {
 			func(x *NodeService) { x.Proxy.DestinationServiceID = "foo" },
 			"Proxy.DestinationServiceID configuration is invalid",
 		},
-		"proxy-local-address": testCase{
+		"proxy-local-address": {
 			func(x *NodeService) { x.Proxy.LocalServiceAddress = "127.0.0.1" },
 			"Proxy.LocalServiceAddress configuration is invalid",
 		},
-		"proxy-local-port": testCase{
+		"proxy-local-port": {
 			func(x *NodeService) { x.Proxy.LocalServicePort = 36 },
 			"Proxy.LocalServicePort configuration is invalid",
 		},
-		"proxy-upstreams": testCase{
-			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{Upstream{}} },
+		"proxy-upstreams": {
+			func(x *NodeService) { x.Proxy.Upstreams = []Upstream{{}} },
 			"Proxy.Upstreams configuration is invalid",
 		},
 	}
@@ -892,11 +935,11 @@ func TestStructs_NodeService_IsSame(t *testing.T) {
 		Tags:    []string{"foo", "bar"},
 		Address: "127.0.0.1",
 		TaggedAddresses: map[string]ServiceAddress{
-			"lan": ServiceAddress{
+			"lan": {
 				Address: "127.0.0.1",
 				Port:    3456,
 			},
-			"wan": ServiceAddress{
+			"wan": {
 				Address: "198.18.0.1",
 				Port:    1234,
 			},
@@ -927,11 +970,11 @@ func TestStructs_NodeService_IsSame(t *testing.T) {
 		Port:              1234,
 		EnableTagOverride: true,
 		TaggedAddresses: map[string]ServiceAddress{
-			"wan": ServiceAddress{
+			"wan": {
 				Address: "198.18.0.1",
 				Port:    1234,
 			},
-			"lan": ServiceAddress{
+			"lan": {
 				Address: "127.0.0.1",
 				Port:    3456,
 			},
@@ -1111,7 +1154,7 @@ func TestStructs_HealthCheck_Clone(t *testing.T) {
 	}
 }
 
-func TestStructs_CheckServiceNodes_Shuffle(t *testing.T) {
+func TestCheckServiceNodes_Shuffle(t *testing.T) {
 	// Make a huge list of nodes.
 	var nodes CheckServiceNodes
 	for i := 0; i < 100; i++ {
@@ -1144,7 +1187,7 @@ func TestStructs_CheckServiceNodes_Shuffle(t *testing.T) {
 	}
 }
 
-func TestStructs_CheckServiceNodes_Filter(t *testing.T) {
+func TestCheckServiceNodes_Filter(t *testing.T) {
 	nodes := CheckServiceNodes{
 		CheckServiceNode{
 			Node: &Node{
@@ -1247,6 +1290,79 @@ func TestStructs_CheckServiceNodes_Filter(t *testing.T) {
 	}
 }
 
+func TestCheckServiceNodes_CanRead(t *testing.T) {
+	type testCase struct {
+		name     string
+		csn      CheckServiceNode
+		authz    acl.Authorizer
+		expected acl.EnforcementDecision
+	}
+
+	fn := func(t *testing.T, tc testCase) {
+		actual := tc.csn.CanRead(tc.authz)
+		require.Equal(t, tc.expected, actual)
+	}
+
+	var testCases = []testCase{
+		{
+			name:     "empty",
+			expected: acl.Deny,
+		},
+		{
+			name: "node read not authorized",
+			csn: CheckServiceNode{
+				Node:    &Node{Node: "name"},
+				Service: &NodeService{Service: "service-name"},
+			},
+			authz:    aclAuthorizerCheckServiceNode{allowService: true},
+			expected: acl.Deny,
+		},
+		{
+			name: "service read not authorized",
+			csn: CheckServiceNode{
+				Node:    &Node{Node: "name"},
+				Service: &NodeService{Service: "service-name"},
+			},
+			authz:    aclAuthorizerCheckServiceNode{allowNode: true},
+			expected: acl.Deny,
+		},
+		{
+			name: "read authorized",
+			csn: CheckServiceNode{
+				Node:    &Node{Node: "name"},
+				Service: &NodeService{Service: "service-name"},
+			},
+			authz:    acl.AllowAll(),
+			expected: acl.Allow,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			fn(t, tc)
+		})
+	}
+}
+
+type aclAuthorizerCheckServiceNode struct {
+	acl.Authorizer
+	allowNode    bool
+	allowService bool
+}
+
+func (a aclAuthorizerCheckServiceNode) ServiceRead(string, *acl.AuthorizerContext) acl.EnforcementDecision {
+	if a.allowService {
+		return acl.Allow
+	}
+	return acl.Deny
+}
+
+func (a aclAuthorizerCheckServiceNode) NodeRead(string, *acl.AuthorizerContext) acl.EnforcementDecision {
+	if a.allowNode {
+		return acl.Allow
+	}
+	return acl.Deny
+}
+
 func TestStructs_DirEntry_Clone(t *testing.T) {
 	e := &DirEntry{
 		LockIndex: 5,
@@ -1274,7 +1390,7 @@ func TestStructs_DirEntry_Clone(t *testing.T) {
 func TestStructs_ValidateServiceAndNodeMetadata(t *testing.T) {
 	tooMuchMeta := make(map[string]string)
 	for i := 0; i < metaMaxKeyPairs+1; i++ {
-		tooMuchMeta[string(i)] = "value"
+		tooMuchMeta[fmt.Sprint(i)] = "value"
 	}
 	type testcase struct {
 		Meta              map[string]string
@@ -1328,7 +1444,7 @@ func TestStructs_ValidateServiceAndNodeMetadata(t *testing.T) {
 			"",
 			"",
 		},
-		"reserved key prefix allowed via whitelist just for gateway - " + MetaWANFederationKey: {
+		"reserved key prefix allowed via an allowlist just for gateway - " + MetaWANFederationKey: {
 			map[string]string{
 				MetaWANFederationKey: "value1",
 			},
@@ -1394,10 +1510,10 @@ func TestStructs_validateMetaPair(t *testing.T) {
 		{metaKeyReservedPrefix + "key", "value", "reserved for internal use", false, nil},
 		// reserved prefix, allowed
 		{metaKeyReservedPrefix + "key", "value", "", true, nil},
-		// reserved prefix, not allowed via whitelist
-		{metaKeyReservedPrefix + "bad", "value", "reserved for internal use", false, map[string]struct{}{metaKeyReservedPrefix + "good": struct{}{}}},
-		// reserved prefix, allowed via whitelist
-		{metaKeyReservedPrefix + "good", "value", "", true, map[string]struct{}{metaKeyReservedPrefix + "good": struct{}{}}},
+		// reserved prefix, not allowed via an allowlist
+		{metaKeyReservedPrefix + "bad", "value", "reserved for internal use", false, map[string]struct{}{metaKeyReservedPrefix + "good": {}}},
+		// reserved prefix, allowed via an allowlist
+		{metaKeyReservedPrefix + "good", "value", "", true, map[string]struct{}{metaKeyReservedPrefix + "good": {}}},
 		// value too long
 		{"key", longValue, "Value is too long", false, nil},
 	}
@@ -1628,7 +1744,7 @@ func TestNode_BestAddress(t *testing.T) {
 	nodeWANAddr := "198.18.19.20"
 
 	cases := map[string]testCase{
-		"address": testCase{
+		"address": {
 			input: Node{
 				Address: nodeAddr,
 			},
@@ -1636,7 +1752,7 @@ func TestNode_BestAddress(t *testing.T) {
 			lanAddr: nodeAddr,
 			wanAddr: nodeAddr,
 		},
-		"wan-address": testCase{
+		"wan-address": {
 			input: Node{
 				Address: nodeAddr,
 				TaggedAddresses: map[string]string{
@@ -1676,7 +1792,7 @@ func TestNodeService_BestAddress(t *testing.T) {
 	serviceWANPort := 987
 
 	cases := map[string]testCase{
-		"no-address": testCase{
+		"no-address": {
 			input: NodeService{
 				Port: servicePort,
 			},
@@ -1686,7 +1802,7 @@ func TestNodeService_BestAddress(t *testing.T) {
 			wanAddr: "",
 			wanPort: servicePort,
 		},
-		"service-address": testCase{
+		"service-address": {
 			input: NodeService{
 				Address: serviceAddr,
 				Port:    servicePort,
@@ -1697,12 +1813,12 @@ func TestNodeService_BestAddress(t *testing.T) {
 			wanAddr: serviceAddr,
 			wanPort: servicePort,
 		},
-		"service-wan-address": testCase{
+		"service-wan-address": {
 			input: NodeService{
 				Address: serviceAddr,
 				Port:    servicePort,
 				TaggedAddresses: map[string]ServiceAddress{
-					"wan": ServiceAddress{
+					"wan": {
 						Address: serviceWANAddr,
 						Port:    serviceWANPort,
 					},
@@ -1714,12 +1830,12 @@ func TestNodeService_BestAddress(t *testing.T) {
 			wanAddr: serviceWANAddr,
 			wanPort: serviceWANPort,
 		},
-		"service-wan-address-default-port": testCase{
+		"service-wan-address-default-port": {
 			input: NodeService{
 				Address: serviceAddr,
 				Port:    servicePort,
 				TaggedAddresses: map[string]ServiceAddress{
-					"wan": ServiceAddress{
+					"wan": {
 						Address: serviceWANAddr,
 						Port:    0,
 					},
@@ -1731,11 +1847,11 @@ func TestNodeService_BestAddress(t *testing.T) {
 			wanAddr: serviceWANAddr,
 			wanPort: servicePort,
 		},
-		"service-wan-address-node-lan": testCase{
+		"service-wan-address-node-lan": {
 			input: NodeService{
 				Port: servicePort,
 				TaggedAddresses: map[string]ServiceAddress{
-					"wan": ServiceAddress{
+					"wan": {
 						Address: serviceWANAddr,
 						Port:    serviceWANPort,
 					},
@@ -1783,7 +1899,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 	serviceWANPort := 987
 
 	cases := map[string]testCase{
-		"node-address": testCase{
+		"node-address": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1798,7 +1914,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 			wanAddr: nodeAddr,
 			wanPort: servicePort,
 		},
-		"node-wan-address": testCase{
+		"node-wan-address": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1816,7 +1932,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 			wanAddr: nodeWANAddr,
 			wanPort: servicePort,
 		},
-		"service-address": testCase{
+		"service-address": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1836,7 +1952,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 			wanAddr: serviceAddr,
 			wanPort: servicePort,
 		},
-		"service-wan-address": testCase{
+		"service-wan-address": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1849,7 +1965,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 					Address: serviceAddr,
 					Port:    servicePort,
 					TaggedAddresses: map[string]ServiceAddress{
-						"wan": ServiceAddress{
+						"wan": {
 							Address: serviceWANAddr,
 							Port:    serviceWANPort,
 						},
@@ -1862,7 +1978,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 			wanAddr: serviceWANAddr,
 			wanPort: serviceWANPort,
 		},
-		"service-wan-address-default-port": testCase{
+		"service-wan-address-default-port": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1875,7 +1991,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 					Address: serviceAddr,
 					Port:    servicePort,
 					TaggedAddresses: map[string]ServiceAddress{
-						"wan": ServiceAddress{
+						"wan": {
 							Address: serviceWANAddr,
 							Port:    0,
 						},
@@ -1888,7 +2004,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 			wanAddr: serviceWANAddr,
 			wanPort: servicePort,
 		},
-		"service-wan-address-node-lan": testCase{
+		"service-wan-address-node-lan": {
 			input: CheckServiceNode{
 				Node: &Node{
 					Address: nodeAddr,
@@ -1900,7 +2016,7 @@ func TestCheckServiceNode_BestAddress(t *testing.T) {
 				Service: &NodeService{
 					Port: servicePort,
 					TaggedAddresses: map[string]ServiceAddress{
-						"wan": ServiceAddress{
+						"wan": {
 							Address: serviceWANAddr,
 							Port:    serviceWANPort,
 						},
@@ -2072,7 +2188,7 @@ func makeMonster() *monsterStruct {
 			"aaa": "bbb",
 		},
 		MapStringSlice: map[string][]string{
-			"aaa": []string{"bbb"},
+			"aaa": {"bbb"},
 		},
 
 		Dur:     5 * time.Second,
@@ -2124,8 +2240,8 @@ func TestSnapshotRequestResponse_MsgpackEncodeDecode(t *testing.T) {
 }
 
 func TestGatewayService_IsSame(t *testing.T) {
-	gateway := NewServiceID("gateway", nil)
-	svc := NewServiceID("web", nil)
+	gateway := NewServiceName("gateway", nil)
+	svc := NewServiceName("web", nil)
 	kind := ServiceKindTerminatingGateway
 	ca := "ca.pem"
 	cert := "client.pem"
@@ -2169,8 +2285,8 @@ func TestGatewayService_IsSame(t *testing.T) {
 			t.Fatalf("should be the same")
 		}
 	}
-	check(func() { other.Gateway = NewServiceID("other", nil) }, func() { other.Gateway = gateway })
-	check(func() { other.Service = NewServiceID("other", nil) }, func() { other.Service = svc })
+	check(func() { other.Gateway = NewServiceName("other", nil) }, func() { other.Gateway = gateway })
+	check(func() { other.Service = NewServiceName("other", nil) }, func() { other.Service = svc })
 	check(func() { other.GatewayKind = ServiceKindIngressGateway }, func() { other.GatewayKind = kind })
 	check(func() { other.CAFile = "/certs/cert.pem" }, func() { other.CAFile = ca })
 	check(func() { other.CertFile = "/certs/cert.pem" }, func() { other.CertFile = cert })

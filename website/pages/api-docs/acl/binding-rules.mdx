@@ -14,8 +14,8 @@ The `/acl/binding-rule` endpoints [create](#create-a-binding-rule),
 [list](#list-binding-rules) and [delete](#delete-a-binding-rule) ACL binding
 rules in Consul.
 
-For more information on how to setup ACLs, please see
-the [ACL Guide](https://learn.hashicorp.com/consul/advanced/day-1-operations/production-acls).
+For more information on how to setup ACLs, please check
+the [ACL tutorial](https://learn.hashicorp.com/tutorials/consul/access-control-setup-production).
 
 ## Create a Binding Rule
 
@@ -64,6 +64,17 @@ The table below shows this endpoint's support for
         }
         ```
 
+  - `BindType=node` - The computed bind name value is used as an
+    `ACLNodeIdentity.NodeName` field in the token that is created.
+
+        ```json
+        { ...other fields...
+            "NodeIdentities": [
+                { "NodeName": "<computed BindName>", "Datacenter": "<local datacenter>" }
+            ]
+        }
+        ```
+
   - `BindType=role` - The computed bind name value is used as a `RoleLink.Name`
     field in the token that is created. This binding rule will only apply if a
     role with the given name exists at login-time. If it does not then this
@@ -90,7 +101,7 @@ The table below shows this endpoint's support for
 - `Namespace` `(string: "")` <EnterpriseAlert inline /> - Specifies the namespace to
   create the binding rule. If not provided in the JSON body, the value of
   the `ns` URL query parameter or in the `X-Consul-Namespace` header will be used.
-  If not provided at all, the namespace will be inherited from the request's ACL
+  If not provided, the namespace will be inherited from the request's ACL
   token or will default to the `default` namespace. Added in Consul 1.7.0.
 
 ### Sample Payload
@@ -107,7 +118,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X PUT \
     --data @payload.json \
     http://127.0.0.1:8500/v1/acl/binding-rule
@@ -161,7 +172,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X GET http://127.0.0.1:8500/v1/acl/binding-rule/000ed53c-e2d3-e7e6-31a5-c19bc3518a3d
 ```
 
@@ -233,6 +244,17 @@ The table below shows this endpoint's support for
         }
         ```
 
+  - `BindType=node` - The computed bind name value is used as an
+    `ACLNodeIdentity.NodeName` field in the token that is created.
+
+        ```json
+        { ...other fields...
+            "NodeIdentities": [
+                { "NodeName": "<computed BindName>", "Datacenter": "<local datacenter>" }
+            ]
+        }
+        ```
+
   - `BindType=role` - The computed bind name value is used as a `RoleLink.Name`
     field in the token that is created. This binding rule will only apply if a
     role with the given name exists at login-time. If it does not then this
@@ -259,7 +281,7 @@ The table below shows this endpoint's support for
 - `Namespace` `(string: "")` <EnterpriseAlert inline /> - Specifies the namespace of
   the binding rule to update. If not provided in the JSON body, the value of
   the `ns` URL query parameter or in the `X-Consul-Namespace` header will be used.
-  If not provided at all, the namespace will be inherited from the request's ACL
+  If not provided, the namespace will be inherited from the request's ACL
   token or will default to the `default` namespace. Added in Consul 1.7.0.
 
 ### Sample Payload
@@ -275,7 +297,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X PUT \
     --data @payload.json \
     http://127.0.0.1:8500/v1/acl/binding-rule/000ed53c-e2d3-e7e6-31a5-c19bc3518a3d
@@ -330,7 +352,7 @@ The table below shows this endpoint's support for
 
 ### Sample Request
 
-```shell
+```shell-session
 $ curl -X DELETE \
     http://127.0.0.1:8500/v1/acl/binding-rule/000ed53c-e2d3-e7e6-31a5-c19bc3518a3d
 ```
@@ -373,7 +395,7 @@ The table below shows this endpoint's support for
 
 ## Sample Request
 
-```shell
+```shell-session
 $ curl -X GET http://127.0.0.1:8500/v1/acl/binding-rules
 ```
 
@@ -394,6 +416,7 @@ $ curl -X GET http://127.0.0.1:8500/v1/acl/binding-rules
     "ID": "b4f0a0a3-69f2-7a4f-6bef-326034ace9fa",
     "Description": "example 2",
     "AuthMethod": "minikube-2",
+    "BindType": "service",
     "Selector": "serviceaccount.namespace==default",
     "BindName": "k8s-{{ serviceaccount.name }}",
     "CreateIndex": 18,

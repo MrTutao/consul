@@ -1,7 +1,7 @@
 ---
 layout: docs
-page_title: Consul Enterprise
-sidebar_title: Consul Enterprise
+page_title: Enterprise Features
+sidebar_title: Enterprise Features
 description: >-
   Consul Enterprise features a number of capabilities beyond the open source
   offering that may be beneficial in certain workflows.
@@ -9,14 +9,11 @@ description: >-
 
 # Consul Enterprise
 
-[Consul Enterprise](https://www.hashicorp.com/consul) features ease the complexity of operating Consul at
-organizational scale by automating common operator workflows. It introduces capabilities for expanding
-performance scalability, resiliency, and cluster lifecycle. It also adds support for application and service
-architectures across complex network topologies. If you have already purchased Consul Enterprise, please
-see the [licensing section](#licensing) below.
+[Consul Enterprise](https://www.hashicorp.com/consul) features address the organizational complexities of collaboration, operations, scale and governance. It includes capabilities that improve failure resilience, read scalability, and managing access in accordance with organizational policies. It also adds support for application and service architectures across complex network topologies. If you have already purchased Consul Enterprise, please see the [licensing section](#licensing) below.
 
 Features include:
 
+- [Audit Logging](/docs/enterprise/audit-logging)
 - [Automated Backups](/docs/enterprise/backups)
 - [Automated Upgrades](/docs/enterprise/upgrades)
 - [Enhanced Read Scalability](/docs/enterprise/read-scale)
@@ -57,7 +54,7 @@ forwarded to the leading server via the RPC forwarding functionality.
 Below are your two options for setting the license file.
 
 You can set the license via the
-[API](/api/operator/license) or the [CLI](/docs/commands/license). When
+[API](/api/operator/license) or the [CLI](/commands/license). When
 you first start Consul, a 30-minute temporary license is available to allow you
 time to license the datacenter. You should set the license within ten minutes of
 starting the first Consul process to allow time for the license to propagate.

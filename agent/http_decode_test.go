@@ -226,9 +226,9 @@ var checkTypeHeaderTestCases = []struct {
 		desc: "filled in map",
 		in:   `{"a": ["aa", "aaa"], "b": ["bb", "bbb", "bbbb"], "c": [], "d": ["dd"]}`,
 		want: map[string][]string{
-			"a": []string{"aa", "aaa"},
-			"b": []string{"bb", "bbb", "bbbb"},
-			"d": []string{"dd"},
+			"a": {"aa", "aaa"},
+			"b": {"bb", "bbb", "bbbb"},
+			"d": {"dd"},
 		},
 	},
 	{
@@ -282,6 +282,7 @@ var translateCheckTypeTCs = [][]translateKeyTestCase{
 	translateScriptArgsTCs,
 	translateDeregisterTCs,
 	translateDockerTCs,
+	translateGRPCUseTLSTCs,
 	translateTLSTCs,
 	translateServiceIDTCs,
 }
@@ -557,6 +558,63 @@ var translateTLSTCs = []translateKeyTestCase{
 		want:       false, // zero value
 		jsonFmtStr: "{}",
 		equalityFn: tlsEqFn,
+	},
+}
+
+// GRPCUseTLS: bool
+func grpcUseTLSEqFn(out interface{}, want interface{}) error {
+	var got interface{}
+	switch v := out.(type) {
+	case structs.CheckDefinition:
+		got = v.GRPCUseTLS
+	case *structs.CheckDefinition:
+		got = v.GRPCUseTLS
+	case structs.CheckType:
+		got = v.GRPCUseTLS
+	case *structs.CheckType:
+		got = v.GRPCUseTLS
+	case structs.HealthCheckDefinition:
+		got = v.GRPCUseTLS
+	case *structs.HealthCheckDefinition:
+		got = v.GRPCUseTLS
+	default:
+		panic(fmt.Sprintf("unexpected type %T", out))
+	}
+	if got != want {
+		return fmt.Errorf("expected GRPCUseTLS to be %v, got %v", want, got)
+	}
+	return nil
+}
+
+var grpcUseTLSFields = []string{`"GRPCUseTLS": %s`, `"grpc_use_tls": %s`}
+var translateGRPCUseTLSTCs = []translateKeyTestCase{
+	{
+		desc:       "GRPCUseTLS: both set",
+		in:         []interface{}{"true", "false"},
+		want:       true,
+		jsonFmtStr: "{" + strings.Join(grpcUseTLSFields, ",") + "}",
+		equalityFn: grpcUseTLSEqFn,
+	},
+	{
+		desc:       "GRPCUseTLS: first set",
+		in:         []interface{}{`true`},
+		want:       true,
+		jsonFmtStr: "{" + grpcUseTLSFields[0] + "}",
+		equalityFn: grpcUseTLSEqFn,
+	},
+	{
+		desc:       "GRPCUseTLS: second set",
+		in:         []interface{}{`true`},
+		want:       true,
+		jsonFmtStr: "{" + grpcUseTLSFields[1] + "}",
+		equalityFn: grpcUseTLSEqFn,
+	},
+	{
+		desc:       "GRPCUseTLS: neither set",
+		in:         []interface{}{},
+		want:       false, // zero value
+		jsonFmtStr: "{}",
+		equalityFn: grpcUseTLSEqFn,
 	},
 }
 
@@ -873,7 +931,7 @@ func TestDecodeAgentRegisterCheck(t *testing.T) {
 			if err != nil && !tc.wantErr {
 				t.Fatalf("expected nil error, got %v", err)
 			}
-			if err := checkTypeHeaderTest(out, tc.want, ""); err != nil {
+			if err := checkTypeHeaderTest(out, tc.want); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -1747,7 +1805,7 @@ func TestDecodeAgentRegisterService(t *testing.T) {
 			if err != nil && !tc.wantErr {
 				t.Fatalf("expected nil error, got %v", err)
 			}
-			if err := checkTypeHeaderTest(out.Check, tc.want, "Check"); err != nil {
+			if err := checkTypeHeaderTest(out.Check, tc.want); err != nil {
 				t.Fatal(err)
 			}
 			if out.Checks == nil {
@@ -1756,7 +1814,7 @@ func TestDecodeAgentRegisterService(t *testing.T) {
 				}
 				return
 			}
-			if err := checkTypeHeaderTest(out.Checks[0], tc.want, "Checks[0]"); err != nil {
+			if err := checkTypeHeaderTest(out.Checks[0], tc.want); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -1996,8 +2054,6 @@ func TestDecodeCatalogRegister(t *testing.T) {
 //     DestinationName	string
 //     SourceType	structs.IntentionSourceType
 //     Action	structs.IntentionAction
-//     DefaultAddr	string
-//     DefaultPort	int
 //     Meta	map[string]string
 //     Precedence	int
 //     CreatedAt	time.Time	mapstructure:'-'
@@ -2525,7 +2581,7 @@ func checkTypeDurationTest(check interface{}, want time.Duration, prefix string)
 
 // checkTypeDurationTest is a helper func to test the Header map in a CheckType or CheckDefiniton
 // (to reduce repetetive typing).
-func checkTypeHeaderTest(check interface{}, want map[string][]string, prefix string) error {
+func checkTypeHeaderTest(check interface{}, want map[string][]string) error {
 
 	var header map[string][]string
 	switch v := check.(type) {

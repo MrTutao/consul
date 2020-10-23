@@ -1,0 +1,38 @@
+%notice {
+  border-radius: $decor-radius-100;
+  border: 1px solid;
+}
+%notice p:last-child a:only-child {
+  @extend %p3;
+  font-weight: $typo-weight-bold;
+}
+%notice-success,
+%notice-info,
+%notice-highlight,
+%notice-error,
+%notice-warning {
+  @extend %notice;
+}
+%notice::before {
+  @extend %as-pseudo;
+}
+%notice-success {
+  @extend %frame-green-500;
+}
+%notice-info {
+  border-color: $blue-100;
+  background-color: $gray-010;
+  color: $black;
+}
+%notice-info header * {
+  color: $blue-700;
+}
+%notice-highlight {
+  @extend %frame-gray-800;
+}
+%notice-warning {
+  @extend %frame-yellow-500;
+}
+%notice-error {
+  @extend %frame-red-500;
+}

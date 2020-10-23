@@ -2,10 +2,11 @@ package structs
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/consul/acl"
-	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/lib/stringslice"
 	"github.com/miekg/dns"
 )
 
@@ -26,6 +27,7 @@ type IngressGatewayConfigEntry struct {
 	// what services to associated to those ports.
 	Listeners []IngressListener
 
+	Meta           map[string]string `json:",omitempty"`
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	RaftIndex
 }
@@ -37,7 +39,7 @@ type IngressListener struct {
 	// Protocol declares what type of traffic this listener is expected to
 	// receive. Depending on the protocol, a listener might support multiplexing
 	// services over a single port, or additional discovery chain features. The
-	// current supported values are: (tcp | http).
+	// current supported values are: (tcp | http | http2 | grpc).
 	Protocol string
 
 	// Services declares the set of services to which the listener forwards
@@ -72,6 +74,7 @@ type IngressService struct {
 	// using a "tcp" listener.
 	Hosts []string
 
+	Meta           map[string]string `json:",omitempty"`
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 }
 
@@ -90,6 +93,13 @@ func (e *IngressGatewayConfigEntry) GetName() string {
 	}
 
 	return e.Name
+}
+
+func (e *IngressGatewayConfigEntry) GetMeta() map[string]string {
+	if e == nil {
+		return nil
+	}
+	return e.Meta
 }
 
 func (e *IngressGatewayConfigEntry) Normalize() error {
@@ -120,9 +130,15 @@ func (e *IngressGatewayConfigEntry) Normalize() error {
 }
 
 func (e *IngressGatewayConfigEntry) Validate() error {
+	if err := validateConfigEntryMeta(e.Meta); err != nil {
+		return err
+	}
+
 	validProtocols := map[string]bool{
-		"http": true,
-		"tcp":  true,
+		"tcp":   true,
+		"http":  true,
+		"http2": true,
+		"grpc":  true,
 	}
 	declaredPorts := make(map[int]bool)
 
@@ -133,7 +149,7 @@ func (e *IngressGatewayConfigEntry) Validate() error {
 		declaredPorts[listener.Port] = true
 
 		if _, ok := validProtocols[listener.Protocol]; !ok {
-			return fmt.Errorf("Protocol must be either 'http' or 'tcp', '%s' is an unsupported protocol.", listener.Protocol)
+			return fmt.Errorf("protocol must be 'tcp', 'http', 'http2', or 'grpc'. '%s' is an unsupported protocol", listener.Protocol)
 		}
 
 		if len(listener.Services) == 0 {
@@ -171,7 +187,7 @@ func (e *IngressGatewayConfigEntry) Validate() error {
 					return fmt.Errorf("Hosts must be unique within a specific listener (listener on port %d)", listener.Port)
 				}
 				declaredHosts[h] = true
-				if err := validateHost(h); err != nil {
+				if err := validateHost(e.TLS.Enabled, h); err != nil {
 					return err
 				}
 			}
@@ -181,7 +197,16 @@ func (e *IngressGatewayConfigEntry) Validate() error {
 	return nil
 }
 
-func validateHost(host string) error {
+func validateHost(tlsEnabled bool, host string) error {
+	// Special case '*' so that non-TLS ingress gateways can use it. This allows
+	// an easy demo/testing experience.
+	if host == "*" {
+		if tlsEnabled {
+			return fmt.Errorf("Host '*' is not allowed when TLS is enabled, all hosts must be valid DNS records to add as a DNSSAN")
+		}
+		return nil
+	}
+
 	wildcardPrefix := "*."
 	if _, ok := dns.IsDomainName(host); !ok {
 		return fmt.Errorf("Host %q must be a valid DNS hostname", host)
@@ -191,11 +216,45 @@ func validateHost(host string) error {
 		return fmt.Errorf("Host %q is not valid, a wildcard specifier is only allowed as the leftmost label", host)
 	}
 
-	if host == "*" {
-		return fmt.Errorf("Host '*' is not allowed, wildcards can only be used as a prefix/suffix")
+	return nil
+}
+
+// ListRelatedServices implements discoveryChainConfigEntry
+//
+// For ingress-gateway config entries this only finds services that are
+// explicitly linked in the ingress-gateway config entry. Wildcards will not
+// expand to all services.
+//
+// This function is used during discovery chain graph validation to prevent
+// erroneous sets of config entries from being created. Wildcard ingress
+// filters out sets with protocol mismatch elsewhere so it isn't an issue here
+// that needs fixing.
+func (e *IngressGatewayConfigEntry) ListRelatedServices() []ServiceID {
+	found := make(map[ServiceID]struct{})
+
+	for _, listener := range e.Listeners {
+		for _, service := range listener.Services {
+			if service.Name == WildcardSpecifier {
+				continue
+			}
+			svcID := NewServiceID(service.Name, &service.EnterpriseMeta)
+			found[svcID] = struct{}{}
+		}
 	}
 
-	return nil
+	if len(found) == 0 {
+		return nil
+	}
+
+	out := make([]ServiceID, 0, len(found))
+	for svc := range found {
+		out = append(out, svc)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].EnterpriseMeta.LessThan(&out[j].EnterpriseMeta) ||
+			out[i].ID < out[j].ID
+	})
+	return out
 }
 
 func (e *IngressGatewayConfigEntry) CanRead(authz acl.Authorizer) bool {
@@ -226,8 +285,8 @@ func (e *IngressGatewayConfigEntry) GetEnterpriseMeta() *EnterpriseMeta {
 	return &e.EnterpriseMeta
 }
 
-func (s *IngressService) ToServiceID() ServiceID {
-	return NewServiceID(s.Name, &s.EnterpriseMeta)
+func (s *IngressService) ToServiceName() ServiceName {
+	return NewServiceName(s.Name, &s.EnterpriseMeta)
 }
 
 // TerminatingGatewayConfigEntry manages the configuration for a terminating service
@@ -237,6 +296,7 @@ type TerminatingGatewayConfigEntry struct {
 	Name     string
 	Services []LinkedService
 
+	Meta           map[string]string `json:",omitempty"`
 	EnterpriseMeta `hcl:",squash" mapstructure:",squash"`
 	RaftIndex
 }
@@ -248,15 +308,15 @@ type LinkedService struct {
 
 	// CAFile is the optional path to a CA certificate to use for TLS connections
 	// from the gateway to the linked service
-	CAFile string `json:",omitempty"`
+	CAFile string `json:",omitempty" alias:"ca_file"`
 
 	// CertFile is the optional path to a client certificate to use for TLS connections
 	// from the gateway to the linked service
-	CertFile string `json:",omitempty"`
+	CertFile string `json:",omitempty" alias:"cert_file"`
 
 	// KeyFile is the optional path to a private key to use for TLS connections
 	// from the gateway to the linked service
-	KeyFile string `json:",omitempty"`
+	KeyFile string `json:",omitempty" alias:"key_file"`
 
 	// SNI is the optional name to specify during the TLS handshake with a linked service
 	SNI string `json:",omitempty"`
@@ -276,6 +336,13 @@ func (e *TerminatingGatewayConfigEntry) GetName() string {
 	return e.Name
 }
 
+func (e *TerminatingGatewayConfigEntry) GetMeta() map[string]string {
+	if e == nil {
+		return nil
+	}
+	return e.Meta
+}
+
 func (e *TerminatingGatewayConfigEntry) Normalize() error {
 	if e == nil {
 		return fmt.Errorf("config entry is nil")
@@ -293,6 +360,10 @@ func (e *TerminatingGatewayConfigEntry) Normalize() error {
 }
 
 func (e *TerminatingGatewayConfigEntry) Validate() error {
+	if err := validateConfigEntryMeta(e.Meta); err != nil {
+		return err
+	}
+
 	seen := make(map[ServiceID]bool)
 
 	for _, svc := range e.Services {
@@ -355,21 +426,38 @@ func (e *TerminatingGatewayConfigEntry) GetEnterpriseMeta() *EnterpriseMeta {
 
 // GatewayService is used to associate gateways with their linked services.
 type GatewayService struct {
-	Gateway      ServiceID
-	Service      ServiceID
+	Gateway      ServiceName
+	Service      ServiceName
 	GatewayKind  ServiceKind
-	Port         int
-	Protocol     string
-	Hosts        []string
-	CAFile       string
-	CertFile     string
-	KeyFile      string
-	SNI          string
-	FromWildcard bool
+	Port         int      `json:",omitempty"`
+	Protocol     string   `json:",omitempty"`
+	Hosts        []string `json:",omitempty"`
+	CAFile       string   `json:",omitempty"`
+	CertFile     string   `json:",omitempty"`
+	KeyFile      string   `json:",omitempty"`
+	SNI          string   `json:",omitempty"`
+	FromWildcard bool     `json:",omitempty"`
 	RaftIndex
 }
 
 type GatewayServices []*GatewayService
+
+func (g *GatewayService) Addresses(defaultHosts []string) []string {
+	if g.Port == 0 {
+		return nil
+	}
+
+	hosts := g.Hosts
+	if len(hosts) == 0 {
+		hosts = defaultHosts
+	}
+
+	var addresses []string
+	for _, h := range hosts {
+		addresses = append(addresses, fmt.Sprintf("%s:%d", h, g.Port))
+	}
+	return addresses
+}
 
 func (g *GatewayService) IsSame(o *GatewayService) bool {
 	return g.Gateway.Matches(&o.Gateway) &&
@@ -377,7 +465,7 @@ func (g *GatewayService) IsSame(o *GatewayService) bool {
 		g.GatewayKind == o.GatewayKind &&
 		g.Port == o.Port &&
 		g.Protocol == o.Protocol &&
-		lib.StringSliceEqual(g.Hosts, o.Hosts) &&
+		stringslice.Equal(g.Hosts, o.Hosts) &&
 		g.CAFile == o.CAFile &&
 		g.CertFile == o.CertFile &&
 		g.KeyFile == o.KeyFile &&

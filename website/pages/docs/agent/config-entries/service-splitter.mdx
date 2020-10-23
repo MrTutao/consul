@@ -44,16 +44,16 @@ resolution stage.
 Split traffic between two subsets of the same service:
 
 ```hcl
-kind = "service-splitter"
-name = "web"
-splits = [
+Kind = "service-splitter"
+Name = "web"
+Splits = [
   {
-    weight         = 90
-    service_subset = "v1"
+    Weight        = 90
+    ServiceSubset = "v1"
   },
   {
-    weight         = 10
-    service_subset = "v2"
+    Weight        = 10
+    ServiceSubset = "v2"
   },
 ]
 ```
@@ -61,16 +61,16 @@ splits = [
 Split traffic between two services:
 
 ```hcl
-kind = "service-splitter"
-name = "web"
-splits = [
+Kind = "service-splitter"
+Name = "web"
+Splits = [
   {
-    weight = 50
+    Weight  = 50
     # will default to service with same name as config entry ("web")
   },
   {
-    weight  = 10
-    service = "web-rewrite"
+    Weight  = 10
+    Service = "web-rewrite"
   },
 ]
 ```
@@ -80,6 +80,10 @@ splits = [
 - `Kind` - Must be set to `service-splitter`
 
 - `Name` `(string: <required>)` - Set to the name of the service being configured.
+
+- `Namespace` `(string: "default")` <EnterpriseAlert inline /> - Specifies the namespace the config entry will apply to.
+
+- `Meta` `(map<string|string>: nil)` - Specifies arbitrary KV metadata pairs. Added in Consul 1.8.4.
 
 - `Splits` `(array<ServiceSplit>)` - Defines how much traffic to send to which
   set of service instances during a traffic split. The sum of weights across
@@ -101,13 +105,12 @@ splits = [
 
 ## ACLs
 
-Configuration entries may be protected by
-[ACLs](https://learn.hashicorp.com/consul/security-networking/production-acls).
+Configuration entries may be protected by [ACLs](/docs/security/acl).
 
-Reading a `service-splitter` config entry requires `service:read` on itself.
+Reading a `service-splitter` config entry requires `service:read` on the resource.
 
 Creating, updating, or deleting a `service-splitter` config entry requires
-`service:write` on itself and `service:read` on any other service referenced by
+`service:write` on the resource and `service:read` on any other service referenced by
 name in these fields:
 
 - [`Splits[].Service`](#service)

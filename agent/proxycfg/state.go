@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ const (
 	gatewayConfigWatchID               = "gateway-config"
 	externalServiceIDPrefix            = "external-service:"
 	serviceLeafIDPrefix                = "service-leaf:"
+	serviceConfigIDPrefix              = "service-config:"
 	serviceResolverIDPrefix            = "service-resolver:"
 	serviceIntentionsIDPrefix          = "service-intentions:"
 	svcChecksWatchIDPrefix             = cachetype.ServiceHTTPChecksName + ":"
@@ -49,11 +51,12 @@ const (
 // is discarded and a new one created.
 type state struct {
 	// logger, source and cache are required to be set before calling Watch.
-	logger      hclog.Logger
-	source      *structs.QuerySource
-	cache       CacheNotifier
-	dnsConfig   DNSConfig
-	serverSNIFn ServerSNIFunc
+	logger                hclog.Logger
+	source                *structs.QuerySource
+	cache                 CacheNotifier
+	dnsConfig             DNSConfig
+	serverSNIFn           ServerSNIFunc
+	intentionDefaultAllow bool
 
 	// ctx and cancel store the context created during initWatches call
 	ctx    context.Context
@@ -96,7 +99,7 @@ func copyProxyConfig(ns *structs.NodeService) (structs.ConnectProxyConfig, error
 	}
 
 	// we can safely modify these since we just copied them
-	for idx, _ := range proxyCfg.Upstreams {
+	for idx := range proxyCfg.Upstreams {
 		us := &proxyCfg.Upstreams[idx]
 		if us.DestinationType != structs.UpstreamDestTypePreparedQuery && us.DestinationNamespace == "" {
 			// default the upstreams target namespace to the namespace of the proxy
@@ -522,16 +525,17 @@ func (s *state) initWatchesIngressGateway() error {
 
 func (s *state) initialConfigSnapshot() ConfigSnapshot {
 	snap := ConfigSnapshot{
-		Kind:            s.kind,
-		Service:         s.service,
-		ProxyID:         s.proxyID,
-		Address:         s.address,
-		Port:            s.port,
-		ServiceMeta:     s.meta,
-		TaggedAddresses: s.taggedAddresses,
-		Proxy:           s.proxyCfg,
-		Datacenter:      s.source.Datacenter,
-		ServerSNIFn:     s.serverSNIFn,
+		Kind:                  s.kind,
+		Service:               s.service,
+		ProxyID:               s.proxyID,
+		Address:               s.address,
+		Port:                  s.port,
+		ServiceMeta:           s.meta,
+		TaggedAddresses:       s.taggedAddresses,
+		Proxy:                 s.proxyCfg,
+		Datacenter:            s.source.Datacenter,
+		ServerSNIFn:           s.serverSNIFn,
+		IntentionDefaultAllow: s.intentionDefaultAllow,
 	}
 
 	switch s.kind {
@@ -544,20 +548,26 @@ func (s *state) initialConfigSnapshot() ConfigSnapshot {
 		snap.ConnectProxy.WatchedServiceChecks = make(map[structs.ServiceID][]structs.CheckType)
 		snap.ConnectProxy.PreparedQueryEndpoints = make(map[string]structs.CheckServiceNodes)
 	case structs.ServiceKindTerminatingGateway:
-		snap.TerminatingGateway.WatchedServices = make(map[structs.ServiceID]context.CancelFunc)
-		snap.TerminatingGateway.WatchedLeaves = make(map[structs.ServiceID]context.CancelFunc)
-		snap.TerminatingGateway.WatchedIntentions = make(map[structs.ServiceID]context.CancelFunc)
-		snap.TerminatingGateway.WatchedResolvers = make(map[structs.ServiceID]context.CancelFunc)
-		snap.TerminatingGateway.ServiceLeaves = make(map[structs.ServiceID]*structs.IssuedCert)
-		snap.TerminatingGateway.ServiceGroups = make(map[structs.ServiceID]structs.CheckServiceNodes)
-		snap.TerminatingGateway.ServiceResolvers = make(map[structs.ServiceID]*structs.ServiceResolverConfigEntry)
-		snap.TerminatingGateway.GatewayServices = make(map[structs.ServiceID]structs.GatewayService)
+		snap.TerminatingGateway.WatchedServices = make(map[structs.ServiceName]context.CancelFunc)
+		snap.TerminatingGateway.WatchedIntentions = make(map[structs.ServiceName]context.CancelFunc)
+		snap.TerminatingGateway.Intentions = make(map[structs.ServiceName]structs.Intentions)
+		snap.TerminatingGateway.WatchedLeaves = make(map[structs.ServiceName]context.CancelFunc)
+		snap.TerminatingGateway.ServiceLeaves = make(map[structs.ServiceName]*structs.IssuedCert)
+		snap.TerminatingGateway.WatchedConfigs = make(map[structs.ServiceName]context.CancelFunc)
+		snap.TerminatingGateway.ServiceConfigs = make(map[structs.ServiceName]*structs.ServiceConfigResponse)
+		snap.TerminatingGateway.WatchedResolvers = make(map[structs.ServiceName]context.CancelFunc)
+		snap.TerminatingGateway.ServiceResolvers = make(map[structs.ServiceName]*structs.ServiceResolverConfigEntry)
+		snap.TerminatingGateway.ServiceResolversSet = make(map[structs.ServiceName]bool)
+		snap.TerminatingGateway.ServiceGroups = make(map[structs.ServiceName]structs.CheckServiceNodes)
+		snap.TerminatingGateway.GatewayServices = make(map[structs.ServiceName]structs.GatewayService)
+		snap.TerminatingGateway.HostnameServices = make(map[structs.ServiceName]structs.CheckServiceNodes)
 	case structs.ServiceKindMeshGateway:
-		snap.MeshGateway.WatchedServices = make(map[structs.ServiceID]context.CancelFunc)
+		snap.MeshGateway.WatchedServices = make(map[structs.ServiceName]context.CancelFunc)
 		snap.MeshGateway.WatchedDatacenters = make(map[string]context.CancelFunc)
-		snap.MeshGateway.ServiceGroups = make(map[structs.ServiceID]structs.CheckServiceNodes)
+		snap.MeshGateway.ServiceGroups = make(map[structs.ServiceName]structs.CheckServiceNodes)
 		snap.MeshGateway.GatewayGroups = make(map[string]structs.CheckServiceNodes)
-		snap.MeshGateway.ServiceResolvers = make(map[structs.ServiceID]*structs.ServiceResolverConfigEntry)
+		snap.MeshGateway.ServiceResolvers = make(map[structs.ServiceName]*structs.ServiceResolverConfigEntry)
+		snap.MeshGateway.HostnameDatacenters = make(map[string]structs.CheckServiceNodes)
 		// there is no need to initialize the map of service resolvers as we
 		// fully rebuild it every time we get updates
 	case structs.ServiceKindIngressGateway:
@@ -688,7 +698,17 @@ func (s *state) handleUpdateConnectProxy(u cache.UpdateEvent, snap *ConfigSnapsh
 		}
 		snap.Roots = roots
 	case u.CorrelationID == intentionsWatchID:
-		// no-op: Intentions don't get stored in the snapshot, calls to ConnectAuthorize will fetch them from the cache
+		resp, ok := u.Result.(*structs.IndexedIntentionMatches)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+		if len(resp.Matches) > 0 {
+			// RPC supports matching multiple services at once but we only ever
+			// query with the one service we represent currently so just pick
+			// the one result set up.
+			snap.ConnectProxy.Intentions = resp.Matches[0]
+		}
+		snap.ConnectProxy.IntentionsSet = true
 
 	case strings.HasPrefix(u.CorrelationID, "upstream:"+preparedQueryIDPrefix):
 		resp, ok := u.Result.(*structs.PreparedQueryExecuteResponse)
@@ -747,15 +767,13 @@ func (s *state) handleUpdateUpstreams(u cache.UpdateEvent, snap *ConfigSnapshotU
 			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
 		}
 
-		m, ok := snap.WatchedUpstreamEndpoints[svc]
-		if !ok {
-			m = make(map[string]structs.CheckServiceNodes)
-			snap.WatchedUpstreamEndpoints[svc] = m
+		if _, ok := snap.WatchedUpstreamEndpoints[svc]; !ok {
+			snap.WatchedUpstreamEndpoints[svc] = make(map[string]structs.CheckServiceNodes)
 		}
 		snap.WatchedUpstreamEndpoints[svc][targetID] = resp.Nodes
 
 	case strings.HasPrefix(u.CorrelationID, "mesh-gateway:"):
-		resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
+		resp, ok := u.Result.(*structs.IndexedNodesWithGateways)
 		if !ok {
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
@@ -764,10 +782,8 @@ func (s *state) handleUpdateUpstreams(u cache.UpdateEvent, snap *ConfigSnapshotU
 		if !ok {
 			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
 		}
-		m, ok := snap.WatchedGatewayEndpoints[svc]
-		if !ok {
-			m = make(map[string]structs.CheckServiceNodes)
-			snap.WatchedGatewayEndpoints[svc] = m
+		if _, ok = snap.WatchedGatewayEndpoints[svc]; !ok {
+			snap.WatchedGatewayEndpoints[svc] = make(map[string]structs.CheckServiceNodes)
 		}
 		snap.WatchedGatewayEndpoints[svc][dc] = resp.Nodes
 	default:
@@ -859,7 +875,7 @@ func (s *state) resetWatchesFromChain(
 		snap.WatchedUpstreams[id][target.ID] = cancel
 	}
 
-	for dc, _ := range needGateways {
+	for dc := range needGateways {
 		if _, ok := snap.WatchedGateways[id][dc]; ok {
 			continue
 		}
@@ -918,7 +934,7 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 
-		svcMap := make(map[structs.ServiceID]struct{})
+		svcMap := make(map[structs.ServiceName]struct{})
 		for _, svc := range services.Services {
 			// Make sure to add every service to this map, we use it to cancel watches below.
 			svcMap[svc.Service] = struct{}{}
@@ -932,7 +948,7 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 				err := s.cache.Notify(ctx, cachetype.HealthServicesName, &structs.ServiceSpecificRequest{
 					Datacenter:     s.source.Datacenter,
 					QueryOptions:   structs.QueryOptions{Token: s.token},
-					ServiceName:    svc.Service.ID,
+					ServiceName:    svc.Service.Name,
 					EnterpriseMeta: svc.Service.EnterpriseMeta,
 
 					// The gateway acts as the service's proxy, so we do NOT want to discover other proxies
@@ -962,7 +978,7 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 						Entries: []structs.IntentionMatchEntry{
 							{
 								Namespace: svc.Service.NamespaceOrDefault(),
-								Name:      svc.Service.ID,
+								Name:      svc.Service.Name,
 							},
 						},
 					},
@@ -986,7 +1002,7 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 				err := s.cache.Notify(ctx, cachetype.ConnectCALeafName, &cachetype.ConnectCALeafRequest{
 					Datacenter:     s.source.Datacenter,
 					Token:          s.token,
-					Service:        svc.Service.ID,
+					Service:        svc.Service.Name,
 					EnterpriseMeta: svc.Service.EnterpriseMeta,
 				}, serviceLeafIDPrefix+svc.Service.String(), s.ch)
 
@@ -1001,6 +1017,28 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 				snap.TerminatingGateway.WatchedLeaves[svc.Service] = cancel
 			}
 
+			// Watch service configs for the service.
+			// These are used to determine the protocol for the target service.
+			if _, ok := snap.TerminatingGateway.WatchedConfigs[svc.Service]; !ok {
+				ctx, cancel := context.WithCancel(s.ctx)
+				err := s.cache.Notify(ctx, cachetype.ResolvedServiceConfigName, &structs.ServiceConfigRequest{
+					Datacenter:     s.source.Datacenter,
+					QueryOptions:   structs.QueryOptions{Token: s.token},
+					Name:           svc.Service.Name,
+					EnterpriseMeta: svc.Service.EnterpriseMeta,
+				}, serviceConfigIDPrefix+svc.Service.String(), s.ch)
+
+				if err != nil {
+					logger.Error("failed to register watch for a resolved service config",
+						"service", svc.Service.String(),
+						"error", err,
+					)
+					cancel()
+					return err
+				}
+				snap.TerminatingGateway.WatchedConfigs[svc.Service] = cancel
+			}
+
 			// Watch service resolvers for the service
 			// These are used to create clusters and endpoints for the service subsets
 			if _, ok := snap.TerminatingGateway.WatchedResolvers[svc.Service]; !ok {
@@ -1009,7 +1047,7 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 					Datacenter:     s.source.Datacenter,
 					QueryOptions:   structs.QueryOptions{Token: s.token},
 					Kind:           structs.ServiceResolver,
-					Name:           svc.Service.ID,
+					Name:           svc.Service.Name,
 					EnterpriseMeta: svc.Service.EnterpriseMeta,
 				}, serviceResolverIDPrefix+svc.Service.String(), s.ch)
 
@@ -1026,50 +1064,66 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 		}
 
 		// Delete gateway service mapping for services that were not in the update
-		for sid, _ := range snap.TerminatingGateway.GatewayServices {
-			if _, ok := svcMap[sid]; !ok {
-				delete(snap.TerminatingGateway.GatewayServices, sid)
+		for sn := range snap.TerminatingGateway.GatewayServices {
+			if _, ok := svcMap[sn]; !ok {
+				delete(snap.TerminatingGateway.GatewayServices, sn)
+			}
+		}
+
+		// Clean up services with hostname mapping for services that were not in the update
+		for sn := range snap.TerminatingGateway.HostnameServices {
+			if _, ok := svcMap[sn]; !ok {
+				delete(snap.TerminatingGateway.HostnameServices, sn)
 			}
 		}
 
 		// Cancel service instance watches for services that were not in the update
-		for sid, cancelFn := range snap.TerminatingGateway.WatchedServices {
-			if _, ok := svcMap[sid]; !ok {
-				logger.Debug("canceling watch for service", "service", sid.String())
-				delete(snap.TerminatingGateway.WatchedServices, sid)
-				delete(snap.TerminatingGateway.ServiceGroups, sid)
+		for sn, cancelFn := range snap.TerminatingGateway.WatchedServices {
+			if _, ok := svcMap[sn]; !ok {
+				logger.Debug("canceling watch for service", "service", sn.String())
+				delete(snap.TerminatingGateway.WatchedServices, sn)
+				delete(snap.TerminatingGateway.ServiceGroups, sn)
 				cancelFn()
 			}
 		}
 
 		// Cancel leaf cert watches for services that were not in the update
-		for sid, cancelFn := range snap.TerminatingGateway.WatchedLeaves {
-			if _, ok := svcMap[sid]; !ok {
-				logger.Debug("canceling watch for leaf cert", "service", sid.String())
-				delete(snap.TerminatingGateway.WatchedLeaves, sid)
-				delete(snap.TerminatingGateway.ServiceLeaves, sid)
+		for sn, cancelFn := range snap.TerminatingGateway.WatchedLeaves {
+			if _, ok := svcMap[sn]; !ok {
+				logger.Debug("canceling watch for leaf cert", "service", sn.String())
+				delete(snap.TerminatingGateway.WatchedLeaves, sn)
+				delete(snap.TerminatingGateway.ServiceLeaves, sn)
+				cancelFn()
+			}
+		}
+
+		// Cancel service config watches for services that were not in the update
+		for sn, cancelFn := range snap.TerminatingGateway.WatchedConfigs {
+			if _, ok := svcMap[sn]; !ok {
+				logger.Debug("canceling watch for resolved service config", "service", sn.String())
+				delete(snap.TerminatingGateway.WatchedConfigs, sn)
+				delete(snap.TerminatingGateway.ServiceConfigs, sn)
 				cancelFn()
 			}
 		}
 
 		// Cancel service-resolver watches for services that were not in the update
-		for sid, cancelFn := range snap.TerminatingGateway.WatchedResolvers {
-			if _, ok := svcMap[sid]; !ok {
-				logger.Debug("canceling watch for service-resolver", "service", sid.String())
-				delete(snap.TerminatingGateway.WatchedResolvers, sid)
-				delete(snap.TerminatingGateway.ServiceResolvers, sid)
+		for sn, cancelFn := range snap.TerminatingGateway.WatchedResolvers {
+			if _, ok := svcMap[sn]; !ok {
+				logger.Debug("canceling watch for service-resolver", "service", sn.String())
+				delete(snap.TerminatingGateway.WatchedResolvers, sn)
+				delete(snap.TerminatingGateway.ServiceResolvers, sn)
+				delete(snap.TerminatingGateway.ServiceResolversSet, sn)
 				cancelFn()
 			}
 		}
 
 		// Cancel intention watches for services that were not in the update
-		for sid, cancelFn := range snap.TerminatingGateway.WatchedIntentions {
-			if _, ok := svcMap[sid]; !ok {
-				logger.Debug("canceling watch for intention", "service", sid.String())
-				delete(snap.TerminatingGateway.WatchedIntentions, sid)
-
-				// No additional deletions needed, since intentions aren't stored in snapshot
-
+		for sn, cancelFn := range snap.TerminatingGateway.WatchedIntentions {
+			if _, ok := svcMap[sn]; !ok {
+				logger.Debug("canceling watch for intention", "service", sn.String())
+				delete(snap.TerminatingGateway.WatchedIntentions, sn)
+				delete(snap.TerminatingGateway.Intentions, sn)
 				cancelFn()
 			}
 		}
@@ -1080,12 +1134,13 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 
-		sid := structs.ServiceIDFromString(strings.TrimPrefix(u.CorrelationID, externalServiceIDPrefix))
+		sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, externalServiceIDPrefix))
+		delete(snap.TerminatingGateway.ServiceGroups, sn)
+		delete(snap.TerminatingGateway.HostnameServices, sn)
 
 		if len(resp.Nodes) > 0 {
-			snap.TerminatingGateway.ServiceGroups[sid] = resp.Nodes
-		} else if _, ok := snap.TerminatingGateway.ServiceGroups[sid]; ok {
-			delete(snap.TerminatingGateway.ServiceGroups, sid)
+			snap.TerminatingGateway.ServiceGroups[sn] = resp.Nodes
+			snap.TerminatingGateway.HostnameServices[sn] = s.hostnameEndpoints(logging.TerminatingGateway, snap.Datacenter, resp.Nodes)
 		}
 
 	// Store leaf cert for watched service
@@ -1095,23 +1150,46 @@ func (s *state) handleUpdateTerminatingGateway(u cache.UpdateEvent, snap *Config
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 
-		sid := structs.ServiceIDFromString(strings.TrimPrefix(u.CorrelationID, serviceLeafIDPrefix))
-		snap.TerminatingGateway.ServiceLeaves[sid] = leaf
+		sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, serviceLeafIDPrefix))
+		snap.TerminatingGateway.ServiceLeaves[sn] = leaf
 
-	case strings.HasPrefix(u.CorrelationID, "service-resolver:"):
+	case strings.HasPrefix(u.CorrelationID, serviceConfigIDPrefix):
+		serviceConfig, ok := u.Result.(*structs.ServiceConfigResponse)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+
+		sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, serviceConfigIDPrefix))
+		snap.TerminatingGateway.ServiceConfigs[sn] = serviceConfig
+
+	case strings.HasPrefix(u.CorrelationID, serviceResolverIDPrefix):
 		configEntries, ok := u.Result.(*structs.IndexedConfigEntries)
 		if !ok {
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
+		sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, serviceResolverIDPrefix))
 		// There should only ever be one entry for a service resolver within a namespace
 		if len(configEntries.Entries) == 1 {
 			if resolver, ok := configEntries.Entries[0].(*structs.ServiceResolverConfigEntry); ok {
-				snap.TerminatingGateway.ServiceResolvers[structs.NewServiceID(resolver.Name, &resolver.EnterpriseMeta)] = resolver
+				snap.TerminatingGateway.ServiceResolvers[sn] = resolver
 			}
 		}
+		snap.TerminatingGateway.ServiceResolversSet[sn] = true
 
 	case strings.HasPrefix(u.CorrelationID, serviceIntentionsIDPrefix):
-		// no-op: Intentions don't get stored in the snapshot, calls to ConnectAuthorize will fetch them from the cache
+		resp, ok := u.Result.(*structs.IndexedIntentionMatches)
+		if !ok {
+			return fmt.Errorf("invalid type for response: %T", u.Result)
+		}
+
+		sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, serviceIntentionsIDPrefix))
+
+		if len(resp.Matches) > 0 {
+			// RPC supports matching multiple services at once but we only ever
+			// query with the one service we represent currently so just pick
+			// the one result set up.
+			snap.TerminatingGateway.Intentions[sn] = resp.Matches[0]
+		}
 
 	default:
 		// do nothing
@@ -1140,38 +1218,48 @@ func (s *state) handleUpdateMeshGateway(u cache.UpdateEvent, snap *ConfigSnapsho
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 		snap.MeshGateway.FedStateGateways = dcIndexedNodes.DatacenterNodes
+
+		for dc, nodes := range dcIndexedNodes.DatacenterNodes {
+			snap.MeshGateway.HostnameDatacenters[dc] = s.hostnameEndpoints(logging.MeshGateway, snap.Datacenter, nodes)
+		}
+
+		for dc := range snap.MeshGateway.HostnameDatacenters {
+			if _, ok := dcIndexedNodes.DatacenterNodes[dc]; !ok {
+				delete(snap.MeshGateway.HostnameDatacenters, dc)
+			}
+		}
+
 	case serviceListWatchID:
 		services, ok := u.Result.(*structs.IndexedServiceList)
 		if !ok {
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 
-		svcMap := make(map[structs.ServiceID]struct{})
+		svcMap := make(map[structs.ServiceName]struct{})
 		for _, svc := range services.Services {
-			sid := svc.ToServiceID()
 			// Make sure to add every service to this map, we use it to cancel
 			// watches below.
-			svcMap[sid] = struct{}{}
+			svcMap[svc] = struct{}{}
 
-			if _, ok := snap.MeshGateway.WatchedServices[sid]; !ok {
+			if _, ok := snap.MeshGateway.WatchedServices[svc]; !ok {
 				ctx, cancel := context.WithCancel(s.ctx)
 				err := s.cache.Notify(ctx, cachetype.HealthServicesName, &structs.ServiceSpecificRequest{
 					Datacenter:     s.source.Datacenter,
 					QueryOptions:   structs.QueryOptions{Token: s.token},
 					ServiceName:    svc.Name,
 					Connect:        true,
-					EnterpriseMeta: sid.EnterpriseMeta,
-				}, fmt.Sprintf("connect-service:%s", sid.String()), s.ch)
+					EnterpriseMeta: svc.EnterpriseMeta,
+				}, fmt.Sprintf("connect-service:%s", svc.String()), s.ch)
 
 				if err != nil {
 					meshLogger.Error("failed to register watch for connect-service",
-						"service", sid.String(),
+						"service", svc.String(),
 						"error", err,
 					)
 					cancel()
 					return err
 				}
-				snap.MeshGateway.WatchedServices[sid] = cancel
+				snap.MeshGateway.WatchedServices[svc] = cancel
 			}
 		}
 
@@ -1246,10 +1334,10 @@ func (s *state) handleUpdateMeshGateway(u cache.UpdateEvent, snap *ConfigSnapsho
 			return fmt.Errorf("invalid type for response: %T", u.Result)
 		}
 
-		resolvers := make(map[structs.ServiceID]*structs.ServiceResolverConfigEntry)
+		resolvers := make(map[structs.ServiceName]*structs.ServiceResolverConfigEntry)
 		for _, entry := range configEntries.Entries {
 			if resolver, ok := entry.(*structs.ServiceResolverConfigEntry); ok {
-				resolvers[structs.NewServiceID(resolver.Name, &resolver.EnterpriseMeta)] = resolver
+				resolvers[structs.NewServiceName(resolver.Name, &resolver.EnterpriseMeta)] = resolver
 			}
 		}
 		snap.MeshGateway.ServiceResolvers = resolvers
@@ -1282,25 +1370,26 @@ func (s *state) handleUpdateMeshGateway(u cache.UpdateEvent, snap *ConfigSnapsho
 				return fmt.Errorf("invalid type for response: %T", u.Result)
 			}
 
-			sid := structs.ServiceIDFromString(strings.TrimPrefix(u.CorrelationID, "connect-service:"))
+			sn := structs.ServiceNameFromString(strings.TrimPrefix(u.CorrelationID, "connect-service:"))
 
 			if len(resp.Nodes) > 0 {
-				snap.MeshGateway.ServiceGroups[sid] = resp.Nodes
-			} else if _, ok := snap.MeshGateway.ServiceGroups[sid]; ok {
-				delete(snap.MeshGateway.ServiceGroups, sid)
+				snap.MeshGateway.ServiceGroups[sn] = resp.Nodes
+			} else if _, ok := snap.MeshGateway.ServiceGroups[sn]; ok {
+				delete(snap.MeshGateway.ServiceGroups, sn)
 			}
 		case strings.HasPrefix(u.CorrelationID, "mesh-gateway:"):
-			resp, ok := u.Result.(*structs.IndexedCheckServiceNodes)
+			resp, ok := u.Result.(*structs.IndexedNodesWithGateways)
 			if !ok {
 				return fmt.Errorf("invalid type for response: %T", u.Result)
 			}
 
 			dc := strings.TrimPrefix(u.CorrelationID, "mesh-gateway:")
+			delete(snap.MeshGateway.GatewayGroups, dc)
+			delete(snap.MeshGateway.HostnameDatacenters, dc)
 
 			if len(resp.Nodes) > 0 {
 				snap.MeshGateway.GatewayGroups[dc] = resp.Nodes
-			} else if _, ok := snap.MeshGateway.GatewayGroups[dc]; ok {
-				delete(snap.MeshGateway.GatewayGroups, dc)
+				snap.MeshGateway.HostnameDatacenters[dc] = s.hostnameEndpoints(logging.MeshGateway, snap.Datacenter, resp.Nodes)
 			}
 		default:
 			// do nothing for now
@@ -1350,7 +1439,7 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 		watchedSvcs := make(map[string]struct{})
 		upstreamsMap := make(map[IngressListenerKey]structs.Upstreams)
 		for _, service := range services.Services {
-			u := makeUpstream(service, s.address)
+			u := makeUpstream(service)
 
 			err := s.watchIngressDiscoveryChain(snap, u)
 			if err != nil {
@@ -1386,9 +1475,9 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 	return nil
 }
 
-func makeUpstream(g *structs.GatewayService, bindAddr string) structs.Upstream {
+func makeUpstream(g *structs.GatewayService) structs.Upstream {
 	upstream := structs.Upstream{
-		DestinationName:      g.Service.ID,
+		DestinationName:      g.Service.Name,
 		DestinationNamespace: g.Service.NamespaceOrDefault(),
 		LocalBindPort:        g.Port,
 		IngressHosts:         g.Hosts,
@@ -1397,10 +1486,6 @@ func makeUpstream(g *structs.GatewayService, bindAddr string) structs.Upstream {
 		Config: map[string]interface{}{
 			"protocol": g.Protocol,
 		},
-	}
-	upstream.LocalBindAddress = bindAddr
-	if bindAddr == "" {
-		upstream.LocalBindAddress = "0.0.0.0"
 	}
 
 	return upstream
@@ -1520,4 +1605,36 @@ func (s *state) Changed(ns *structs.NodeService, token string) bool {
 		s.port != ns.Port ||
 		!reflect.DeepEqual(s.proxyCfg, proxyCfg) ||
 		s.token != token
+}
+
+// hostnameEndpoints returns all CheckServiceNodes that have hostnames instead of IPs as the address.
+// Envoy cannot resolve hostnames provided through EDS, so we exclusively use CDS for these clusters.
+// If there is a mix of hostnames and addresses we exclusively use the hostnames, since clusters cannot discover
+// services with both EDS and DNS.
+func (s *state) hostnameEndpoints(loggerName string, localDC string, nodes structs.CheckServiceNodes) structs.CheckServiceNodes {
+	var (
+		hasIP       bool
+		hasHostname bool
+		resp        structs.CheckServiceNodes
+	)
+
+	for _, n := range nodes {
+		addr, _ := n.BestAddress(localDC != n.Node.Datacenter)
+		if net.ParseIP(addr) != nil {
+			hasIP = true
+			continue
+		}
+		hasHostname = true
+		resp = append(resp, n)
+	}
+
+	if hasHostname && hasIP {
+		dc := nodes[0].Node.Datacenter
+		sn := nodes[0].Service.CompoundServiceName()
+
+		s.logger.Named(loggerName).
+			Warn("service contains instances with mix of hostnames and IP addresses; only hostnames will be passed to Envoy",
+				"dc", dc, "service", sn.String())
+	}
+	return resp
 }

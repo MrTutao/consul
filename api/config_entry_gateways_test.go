@@ -16,6 +16,10 @@ func TestAPI_ConfigEntries_IngressGateway(t *testing.T) {
 	ingress1 := &IngressGatewayConfigEntry{
 		Kind: IngressGateway,
 		Name: "foo",
+		Meta: map[string]string{
+			"foo": "bar",
+			"gir": "zim",
+		},
 	}
 
 	ingress2 := &IngressGatewayConfigEntry{
@@ -62,6 +66,8 @@ func TestAPI_ConfigEntries_IngressGateway(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, ingress1.Kind, readIngress.Kind)
 	require.Equal(t, ingress1.Name, readIngress.Name)
+	require.Equal(t, ingress1.Meta, readIngress.Meta)
+	require.Equal(t, ingress1.Meta, readIngress.GetMeta())
 
 	// update it
 	ingress1.Listeners = []IngressListener{
@@ -150,7 +156,7 @@ func TestAPI_ConfigEntries_IngressGateway(t *testing.T) {
 	require.NotEqual(t, 0, wm.RequestTime)
 
 	// verify deletion
-	entry, qm, err = config_entries.Get(IngressGateway, "foo", nil)
+	_, _, err = config_entries.Get(IngressGateway, "foo", nil)
 	require.Error(t, err)
 }
 
@@ -164,6 +170,10 @@ func TestAPI_ConfigEntries_TerminatingGateway(t *testing.T) {
 	terminating1 := &TerminatingGatewayConfigEntry{
 		Kind: TerminatingGateway,
 		Name: "foo",
+		Meta: map[string]string{
+			"foo": "bar",
+			"gir": "zim",
+		},
 	}
 
 	terminating2 := &TerminatingGatewayConfigEntry{
@@ -194,6 +204,8 @@ func TestAPI_ConfigEntries_TerminatingGateway(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, terminating1.Kind, readTerminating.Kind)
 	require.Equal(t, terminating1.Name, readTerminating.Name)
+	require.Equal(t, terminating1.Meta, readTerminating.Meta)
+	require.Equal(t, terminating1.Meta, readTerminating.GetMeta())
 
 	// update it
 	terminating1.Services = []LinkedService{
@@ -279,6 +291,6 @@ func TestAPI_ConfigEntries_TerminatingGateway(t *testing.T) {
 	require.NotEqual(t, 0, wm.RequestTime)
 
 	// verify deletion
-	entry, qm, err = configEntries.Get(TerminatingGateway, "foo", nil)
+	_, _, err = configEntries.Get(TerminatingGateway, "foo", nil)
 	require.Error(t, err)
 }

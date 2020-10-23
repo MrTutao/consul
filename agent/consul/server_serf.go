@@ -11,6 +11,7 @@ import (
 	"github.com/hashicorp/consul/agent/metadata"
 	"github.com/hashicorp/consul/agent/structs"
 	"github.com/hashicorp/consul/lib"
+	libserf "github.com/hashicorp/consul/lib/serf"
 	"github.com/hashicorp/consul/logging"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/memberlist"
@@ -73,6 +74,12 @@ func (s *Server) setupSerf(conf *serf.Config, ch chan serf.Event, path string, w
 	} else {
 		conf.Tags["acls"] = string(structs.ACLModeDisabled)
 	}
+
+	// feature flag: advertise support for federation states
+	conf.Tags["ft_fs"] = "1"
+
+	// feature flag: advertise support for service-intentions
+	conf.Tags["ft_si"] = "1"
 
 	var subLoggerName string
 	if wan {
@@ -162,7 +169,13 @@ func (s *Server) setupSerf(conf *serf.Config, ch chan serf.Event, path string, w
 		return nil, err
 	}
 
+	conf.ReconnectTimeoutOverride = libserf.NewReconnectOverride(s.logger)
+
 	s.addEnterpriseSerfTags(conf.Tags)
+
+	if s.config.OverrideInitialSerfTags != nil {
+		s.config.OverrideInitialSerfTags(conf.Tags)
+	}
 
 	return serf.Create(conf)
 }
@@ -355,7 +368,7 @@ func (s *Server) maybeBootstrap() {
 
 		// Retry with exponential backoff to get peer status from this server
 		for attempt := uint(0); attempt < maxPeerRetries; attempt++ {
-			if err := s.connPool.RPC(s.config.Datacenter, server.ShortName, server.Addr, server.Version,
+			if err := s.connPool.RPC(s.config.Datacenter, server.ShortName, server.Addr,
 				"Status.Peers", &structs.DCSpecificRequest{Datacenter: s.config.Datacenter}, &peers); err != nil {
 				nextRetry := (1 << attempt) * time.Second
 				s.logger.Error("Failed to confirm peer status for server (will retry).",

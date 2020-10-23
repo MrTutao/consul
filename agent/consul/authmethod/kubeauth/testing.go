@@ -66,7 +66,7 @@ func StartTestAPIServer(t testing.T) *TestAPIServer {
 	return s
 }
 
-// AuthorizeJWT whitelists the given JWT as able to use the API server.
+// AuthorizeJWT allowlists the given JWT as able to use the API server.
 func (s *TestAPIServer) AuthorizeJWT(jwt string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -94,7 +94,7 @@ func (s *TestAPIServer) SetAllowedServiceAccount(
 	}
 
 	s.allowedServiceAccountJWT = jwt
-	s.replyRead = createReadServiceAccountFound(namespace, name, uid, overrideAnnotation, jwt)
+	s.replyRead = createReadServiceAccountFound(namespace, name, uid, overrideAnnotation)
 	s.replyStatus = createTokenReviewFound(namespace, name, uid, jwt)
 }
 
@@ -223,10 +223,10 @@ func (s *TestAPIServer) handleReadServiceAccount(
 		}
 		w.WriteHeader(http.StatusForbidden)
 	} else if s.replyRead == nil {
-		out = createReadServiceAccountNotFound(namespace, name)
+		out = createReadServiceAccountNotFound(name)
 		w.WriteHeader(http.StatusNotFound)
 	} else if s.replyRead.Namespace != namespace || s.replyRead.Name != name {
-		out = createReadServiceAccountNotFound(namespace, name)
+		out = createReadServiceAccountNotFound(name)
 		w.WriteHeader(http.StatusNotFound)
 	} else {
 		out = s.replyRead
@@ -449,7 +449,7 @@ func createReadServiceAccountForbidden_NoAuthz() *metav1.Status {
 	)
 }
 
-func createReadServiceAccountNotFound(namespace, name string) *metav1.Status {
+func createReadServiceAccountNotFound(name string) *metav1.Status {
 	/*
 	   STATUS: 404
 	   {
@@ -478,7 +478,7 @@ func createReadServiceAccountNotFound(namespace, name string) *metav1.Status {
 	)
 }
 
-func createReadServiceAccountFound(namespace, name, uid, overrideAnnotation, jwt string) *corev1.ServiceAccount {
+func createReadServiceAccountFound(namespace, name, uid, overrideAnnotation string) *corev1.ServiceAccount {
 	/*
 	   STATUS: 200
 	   {
@@ -517,7 +517,7 @@ func createReadServiceAccountFound(namespace, name, uid, overrideAnnotation, jwt
 			CreationTimestamp: metav1.Time{Time: time.Now()},
 		},
 		Secrets: []corev1.ObjectReference{
-			corev1.ObjectReference{
+			{
 				Name: name + "-token-m9cvn",
 			},
 		},

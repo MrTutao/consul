@@ -15,6 +15,71 @@ provided for their upgrades as a result of new features or changed behavior.
 This page is used to document those details separately from the standard
 upgrade flow.
 
+## Consul 1.9.0
+
+The [`enable_central_service_config`](/docs/agent/options#enable_central_service_config)
+configuration now defaults to `true`.
+
+### Changes to Intentions
+
+#### Migration
+
+Upgrading to Consul 1.9.0 will trigger a one-time background migration of
+[intentions](/docs/connect/intentions) into an equivalent set of
+[`service-intentions`](/docs/agent/config-entries/service-intentions) config
+entries. This process will wait until all of the Consul servers in the primary
+datacenter are running Consul 1.9.0+.
+
+All write requests via either the [Intentions
+API](/api-docs/connect/intentions) endpoints or [Config Entry
+API](/api-docs/config) endpoints for a `service-intentions` kind will be
+blocked until the migration process is complete after the upgrade. Reads will
+function normally throughout the migration, so authorization enforcement will
+be unaffected.
+
+Secondary datacenters will perform their own one-time migration operations
+after the primary datacenter completes its migration and all of the Consul
+servers in the secondary datacenter are running Consul 1.9.0+. It is safe to
+upgrade the datacenters in any order.
+
+#### Deprecated Fields
+
+All old ID-based [Intentions API](/api-docs/connect/intentions) CRUD endpoints
+will retain all of their prior fields _as long as those endpoints are
+exclusively used to edit intentions_. Once the underlying config entry
+representation is edited it will transition the intention into the newer format
+where some fields are no longer present. Once this transition occurs those
+intentions can no longer be used with the ID-based endpoints unless they are
+re-created via the old endpoints. Fields that are being removed or changing
+behavior:
+
+- `Intention.ID` after migration is stored in the
+  [`LegacyID`](/docs/agent/config-entries/service-intentions#legacyid) field.
+  After transitioning this field is cleared.
+
+- `Intention.CreatedAt` after migration is stored in the
+  [`LegacyCreateTime`](/docs/agent/config-entries/service-intentions#legacycreatetime)
+  field. After transitioning this field is cleared.
+
+- `Intention.UpdatedAt` after migration is stored in the
+  [`LegacyUpdateTime`](/docs/agent/config-entries/service-intentions#legacyupdatetime)
+  field. After transitioning this field is cleared.
+
+- `Intention.Meta` after migration is stored in the
+  [`LegacyMeta`](/docs/agent/config-entries/service-intentions#legacymeta)
+  field. To complete the transition, this field **must be cleared manually**
+  and the metadata moved up to the enclosing config entry's
+  [`Meta`](/docs/agent/config-entries/service-intentions#meta) field. This is
+  not done automatically since it is potentially a lossy operation.
+
+## Consul 1.8.0
+
+#### Removal of Deprecated Features
+
+The [`acl_enforce_version_8`](/docs/agent/options#acl_enforce_version_8)
+configuration has been removed (with version 8 ACL support by being on by
+default).
+
 ## Consul 1.7.0
 
 Consul 1.7.0 contains three major changes that impact upgrades:
@@ -84,7 +149,7 @@ Connect](#connect-multi-datacenter) in the Enterprise version.
 ### ACL Upgrade
 
 Consul 1.4.0 includes a [new ACL
-system](https://learn.hashicorp.com/consul/security-networking/production-acls)
+system](https://learn.hashicorp.com/tutorials/consul/access-control-setup-production)
 that is designed to have a smooth upgrade path but requires care to upgrade
 components in the right order.
 
@@ -114,7 +179,7 @@ procedure](/docs/upgrading#standard-upgrades).
 
 When a 1.4.0 server first starts, it runs in "Legacy ACL mode". In this mode,
 bootstrap requests and new ACL APIs will not be functional yet and will return
-an error. The server advertises it's ability to support 1.4.0 ACLs via gossip
+an error. The server advertises its ability to support 1.4.0 ACLs via gossip
 and waits.
 
 In the primary datacenter, the servers all wait in legacy ACL mode until they
@@ -263,7 +328,7 @@ Consul 1.0 (and earlier versions of Consul when running with [Raft protocol
 3](/docs/agent/options#_raft_protocol) had an issue where performing
 rolling updates of Consul servers could result in an outage from old servers
 remaining in the cluster.
-[Autopilot](https://learn.hashicorp.com/consul/day-2-operations/autopilot)
+[Autopilot](https://learn.hashicorp.com/tutorials/consul/autopilot-datacenter-operations)
 would normally remove old servers when new ones come online, but it was also
 waiting to promote servers to voters in pairs to maintain an odd quorum size.
 The pairwise promotion feature was removed so that servers become voters as
@@ -271,7 +336,7 @@ soon as they are stable, allowing Autopilot to remove old servers in a safer
 way.
 
 When upgrading from Consul 1.0, you may need to manually
-[force-leave](/docs/commands/force-leave) old servers as part of a rolling
+[force-leave](/commands/force-leave) old servers as part of a rolling
 update to Consul 1.0.1.
 
 ## Consul 1.0
@@ -283,7 +348,7 @@ Please be sure to read over all the details here before upgrading.
 
 The [`-raft-protocol`](/docs/agent/options#_raft_protocol) default has
 been changed from 2 to 3, enabling all
-[Autopilot](https://learn.hashicorp.com/consul/day-2-operations/autopilot)
+[Autopilot](https://learn.hashicorp.com/tutorials/consul/autopilot-datacenter-operations)
 features by default.
 
 Raft protocol version 3 requires Consul running 0.8.0 or newer on all servers
@@ -292,9 +357,9 @@ you will need to set this back to 2 in order to upgrade. See [Raft Protocol
 Version
 Compatibility](/docs/upgrade-specific#raft-protocol-version-compatibility)
 for more details. Also the format of `peers.json` used for outage recovery is
-different when running with the latest Raft protocol. See [Manual Recovery
+different when running with the latest Raft protocol. Review [Manual Recovery
 Using
-peers.json](https://learn.hashicorp.com/consul/day-2-operations/outage#manual-recovery-using-peers-json)
+peers.json](https://learn.hashicorp.com/tutorials/consul/recovery-outage#manual-recovery-using-peers-json)
 for a description of the required format.
 
 Please note that the Raft protocol is different from Consul's internal protocol
@@ -317,7 +382,7 @@ version 3, it will no longer allow servers running any older Raft protocol
 versions to be added. If running a single Consul server, restarting it in-place
 will result in that server not being able to elect itself as a leader. To avoid
 this, either set the Raft protocol back to 2, or use [Manual Recovery Using
-peers.json](https://learn.hashicorp.com/consul/day-2-operations/outage#manual-recovery-using-peers-json)
+peers.json](https://learn.hashicorp.com/tutorials/consul/recovery-outage#manual-recovery-using-peers-json)
 to map the server to its node ID in the Raft quorum configuration.
 
 #### Config Files Require an Extension
@@ -515,7 +580,7 @@ health checks.
 
 If your cluster uses script health checks please be sure to set this to `true`
 as part of upgrading agents. If this is set to `true`, you should also enable
-[ACLs](https://learn.hashicorp.com/consul/security-networking/production-acls)
+[ACLs](https://learn.hashicorp.com/tutorials/consul/access-control-setup-production)
 to provide control over which users are allowed to register health checks that
 could potentially execute scripts on the agent machines.
 
@@ -573,7 +638,7 @@ agents would have to wait to contact a Consul server before learning that.
 The default for
 [`disable_remote_exec`](/docs/agent/options#disable_remote_exec) was
 changed to "true", so now operators need to opt-in to having agents support
-running commands remotely via [`consul exec`](/docs/commands/exec).
+running commands remotely via [`consul exec`](/commands/exec).
 
 #### Raft Protocol Version Compatibility
 
@@ -595,8 +660,8 @@ table of the Raft Protocol versions supported by each Consul version:
 | 0.8             | 1, 2, 3                  |
 
 In order to enable all
-[Autopilot](https://learn.hashicorp.com/consul/day-2-operations/autopilot)
-features, all servers in a Consul cluster must be running with Raft protocol
+[Autopilot](https://learn.hashicorp.com/tutorials/consul/autopilot-datacenter-operations)
+features, all servers in a Consul datacenter must be running with Raft protocol
 version 3 or later.
 
 ## Consul 0.7.1
@@ -718,7 +783,7 @@ the file. Consul 0.7 also uses a new, automatically-created raft/peers.info file
 to avoid ingesting the `peers.json` file on the first start after upgrading (the
 `peers.json` file is simply deleted on the first start after upgrading).
 
-Please be sure to review the [Outage Recovery Guide](https://learn.hashicorp.com/consul/day-2-operations/outage)
+Please be sure to review the [Outage Recovery tutorial](https://learn.hashicorp.com/tutorials/consul/recovery-outage)
 before upgrading for more details.
 
 ## Consul 0.6.4
@@ -839,7 +904,7 @@ this:
 This automatic upgrade will only exist in Consul 0.5.1+ and it will
 be removed starting with Consul 0.6.0+. It will still be possible to upgrade directly
 from pre-0.5.1 versions by using the consul-migrate utility, which is available on the
-[Consul Tools page](/downloads_tools).
+[Consul Tools page](/docs/download-tools).
 
 ## Consul 0.5
 

@@ -8,11 +8,11 @@ import (
 
 	cachetype "github.com/hashicorp/consul/agent/cache-types"
 	"github.com/hashicorp/consul/agent/structs"
-	"github.com/hashicorp/consul/lib"
+	"github.com/hashicorp/consul/lib/decode"
 	"github.com/mitchellh/mapstructure"
 )
 
-func (s *HTTPServer) DiscoveryChainRead(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
+func (s *HTTPHandlers) DiscoveryChainRead(resp http.ResponseWriter, req *http.Request) (interface{}, error) {
 	var args structs.DiscoveryChainRequest
 	if done := s.parse(resp, req, &args.Datacenter, &args.QueryOptions); done {
 		return nil, nil
@@ -59,8 +59,8 @@ func (s *HTTPServer) DiscoveryChainRead(resp http.ResponseWriter, req *http.Requ
 	var out structs.DiscoveryChainResponse
 	defer setMeta(resp, &out.QueryMeta)
 
-	if args.QueryOptions.UseCache {
-		raw, m, err := s.agent.cache.Get(cachetype.CompiledDiscoveryChainName, &args)
+	if s.agent.config.HTTPUseCache && args.QueryOptions.UseCache {
+		raw, m, err := s.agent.cache.Get(req.Context(), cachetype.CompiledDiscoveryChainName, &args)
 		if err != nil {
 			return nil, err
 		}
@@ -90,9 +90,9 @@ func (s *HTTPServer) DiscoveryChainRead(resp http.ResponseWriter, req *http.Requ
 
 // discoveryChainReadRequest is the API variation of structs.DiscoveryChainRequest
 type discoveryChainReadRequest struct {
-	OverrideMeshGateway    structs.MeshGatewayConfig
-	OverrideProtocol       string
-	OverrideConnectTimeout time.Duration
+	OverrideMeshGateway    structs.MeshGatewayConfig `alias:"override_mesh_gateway"`
+	OverrideProtocol       string                    `alias:"override_protocol"`
+	OverrideConnectTimeout time.Duration             `alias:"override_connect_timeout"`
 }
 
 // discoveryChainReadResponse is the API variation of structs.DiscoveryChainResponse
@@ -101,19 +101,17 @@ type discoveryChainReadResponse struct {
 }
 
 func decodeDiscoveryChainReadRequest(raw map[string]interface{}) (*discoveryChainReadRequest, error) {
-	// lib.TranslateKeys doesn't understand []map[string]interface{} so we have
-	// to do this part first.
-	raw = lib.PatchSliceOfMaps(raw, nil, nil)
-
-	lib.TranslateKeys(raw, map[string]string{
-		"override_mesh_gateway":    "overridemeshgateway",
-		"override_protocol":        "overrideprotocol",
-		"override_connect_timeout": "overrideconnecttimeout",
-	})
-
 	var apiReq discoveryChainReadRequest
+	// TODO(dnephin): at this time only JSON payloads are read, so it is unlikely
+	// that HookWeakDecodeFromSlice is necessary. It was added while porting
+	// from lib.PatchSliceOfMaps to decode.HookWeakDecodeFromSlice. It may be
+	// safe to remove in the future.
 	decodeConf := &mapstructure.DecoderConfig{
-		DecodeHook:       mapstructure.StringToTimeDurationHookFunc(),
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			decode.HookWeakDecodeFromSlice,
+			decode.HookTranslateKeys,
+			mapstructure.StringToTimeDurationHookFunc(),
+		),
 		Result:           &apiReq,
 		WeaklyTypedInput: true,
 	}
